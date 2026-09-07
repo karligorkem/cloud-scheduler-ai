@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+src/cloud_scheduler_ai.egg-info/PKG-INFO
+src/cloud_scheduler_ai.egg-info/SOURCES.txt
+src/cloud_scheduler_ai.egg-info/dependency_links.txt
+src/cloud_scheduler_ai.egg-info/requires.txt
+src/cloud_scheduler_ai.egg-info/top_level.txt
+tests/test_smoke.py

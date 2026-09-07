@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+
+# Test and lint cache
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment variables
+.env
+.env.*
+
+# Data
+data/raw/*
+data/processed/*
+
+# Keep data directories
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Model artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Operating system
+Thumbs.db
+.DS_Store
