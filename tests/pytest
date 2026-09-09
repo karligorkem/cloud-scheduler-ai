@@ -1,0 +1,88 @@
+import pytest
+
+from cloud_scheduler.domain.job import Job, JobStatus
+from cloud_scheduler.domain.server import Server
+
+
+def test_failed_allocation_keeps_resources_and_job_unchanged() -> None:
+    server = Server(
+        server_id="server-1",
+        total_cpu=8,
+        total_memory_gb=4.0,
+        gpu_count=1,
+    )
+
+    job = Job(
+        job_id="job-1",
+        required_cpu=2,
+        required_memory_gb=8.0,
+        duration_steps=5,
+        required_gpu_count=1,
+    )
+
+    # Görev 8 GB RAM istiyor ama sunucuda yalnızca 4 GB var.
+    with pytest.raises(ValueError, match="Server cannot host this job"):
+        server.allocate(job)
+
+    # Başarısız işlem hiçbir kaynağı tüketmemeli.
+    assert server.available_cpu == 8
+    assert server.available_memory_gb == 4.0
+    assert server.available_gpu_count == 1
+
+    # Görev beklemeye devam etmeli.
+    assert job.status == JobStatus.WAITING
+    assert job.assigned_server_id is None
+
+def test_allocate_rejects_same_job_twice() -> None:
+    server = Server(
+        server_id="server-1",
+        total_cpu=8,
+        total_memory_gb=16.0,
+    )
+
+    job = Job(
+        job_id="job-1",
+        required_cpu=2,
+        required_memory_gb=4.0,
+        duration_steps=5,
+    )
+
+    # İlk atama başarılı olmalı.
+    server.allocate(job)
+
+    # İkinci atama reddedilmeli.
+    with pytest.raises(ValueError, match="Server cannot host this job"):
+        server.allocate(job)
+
+    # Kaynaklar sadece bir kez düşülmüş olmalı.
+    assert server.available_cpu == 6
+    assert server.available_memory_gb == 12.0
+
+    assert job.status == JobStatus.RUNNING
+    assert job.assigned_server_id == "server-1"
+
+def test_allocate_reserves_resources_and_starts_job() -> None:
+    server = Server(
+        server_id="server-1",
+        total_cpu=8,
+        total_memory_gb=16.0,
+        gpu_count=2,
+    )
+
+    job = Job(
+        job_id="job-1",
+        required_cpu=2,
+        required_memory_gb=4.0,
+        duration_steps=5,
+        required_gpu_count=1,
+    )
+
+    server.allocate(job)
+
+    assert server.available_cpu == 6
+    assert server.available_memory_gb == 12.0
+    assert server.available_gpu_count == 1
+
+    assert job.status == JobStatus.RUNNING
+    assert job.assigned_server_id == "server-1"
+    assert job.remaining_steps == 5
