@@ -1,7 +1,7 @@
 from cloud_scheduler.domain.cluster import Cluster
 from cloud_scheduler.domain.job import Job
 from cloud_scheduler.domain.job_queue import JobQueue
-from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
+from cloud_scheduler.schedulers.base import Scheduler
 
 
 class Simulation:
@@ -11,7 +11,7 @@ class Simulation:
         self,
         cluster: Cluster,
         queue: JobQueue,
-        scheduler: FirstFitScheduler,
+        scheduler: Scheduler,
     ) -> None:
         self.cluster = cluster
         self.queue = queue
