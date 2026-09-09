@@ -3,15 +3,13 @@ from cloud_scheduler.domain.job import Job
 from cloud_scheduler.domain.job_queue import JobQueue
 from cloud_scheduler.domain.server import Server
 from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
+from cloud_scheduler.simulation import Simulation
 
 
 def main() -> None:
-    # Sistemin temel parçalarını oluştur.
+    # 1. Sunucuların bulunacağı kümeyi oluştur.
     cluster = Cluster()
-    queue = JobQueue()
-    scheduler = FirstFitScheduler()
 
-    # Küçük bir sunucu oluştur ve kümeye ekle.
     server = Server(
         server_id="server-1",
         total_cpu=4,
@@ -20,7 +18,7 @@ def main() -> None:
 
     cluster.add_server(server)
 
-    # İlk görev sunucunun bütün kaynaklarını kullanacak.
+    # 2. Çalıştırılacak görevleri oluştur.
     first_job = Job(
         job_id="job-1",
         required_cpu=4,
@@ -28,7 +26,6 @@ def main() -> None:
         duration_steps=2,
     )
 
-    # İkinci görev, ilk görev tamamlanana kadar bekleyecek.
     second_job = Job(
         job_id="job-2",
         required_cpu=2,
@@ -36,55 +33,39 @@ def main() -> None:
         duration_steps=1,
     )
 
+    # 3. Görevleri bekleme sırasına ekle.
+    queue = JobQueue()
     queue.add(first_job)
     queue.add(second_job)
 
-    max_steps = 10
+    # 4. Yerleştirme algoritmasını oluştur.
+    scheduler = FirstFitScheduler()
 
-    while cluster.current_step < max_steps:
-        print(f"\nZaman: {cluster.current_step}")
+    # 5. Hazırladığımız parçaları simülasyona ver.
+    simulation = Simulation(
+        cluster=cluster,
+        queue=queue,
+        scheduler=scheduler,
+    )
 
-        # Kaynaklar yettiği sürece sıradaki görevleri başlat.
-        while True:
-            next_job = queue.peek()
+    # 6. Simülasyonu en fazla 10 adım çalıştır.
+    completed_jobs = simulation.run(max_steps=10)
 
-            if next_job is None:
-                break
+    # 7. Sonuçları terminale yazdır.
+    print(f"Gecen zaman adimi: {cluster.current_step}")
+    print(f"Tamamlanan gorev sayisi: {len(completed_jobs)}")
 
-            started = scheduler.schedule_next(cluster, queue)
+    for job in completed_jobs:
+        print(
+            f"Gorev: {job.job_id}"
+            f" | Sunucu: {job.assigned_server_id}"
+            f" | Durum: {job.status.value}"
+        )
 
-            if not started:
-                print(f"Bekliyor: {next_job.job_id}")
-                break
-
-            print(
-                f"Basladi: {next_job.job_id}"
-                f" -> {next_job.assigned_server_id}"
-            )
-
-        # Bütün sunucularda bir zaman adımı geçir.
-        completed_jobs = cluster.advance_time()
-
-        for job in completed_jobs:
-            print(
-                f"Tamamlandi: {job.job_id}"
-                f" | Zaman: {cluster.current_step}"
-            )
-
-        # Herhangi bir sunucuda çalışan görev kaldı mı?
-        has_running_jobs = False
-
-        for current_server in cluster.servers:
-            if current_server.running_jobs:
-                has_running_jobs = True
-                break
-
-        # Bekleyen ve çalışan görev yoksa demo bitmiştir.
-        if queue.peek() is None and not has_running_jobs:
-            print("\nButun gorevler tamamlandi.")
-            return
-
-    print("\nAdim sinirina ulasildi; tamamlanmamis gorevler var.")
+    if simulation.is_finished():
+        print("Butun gorevler tamamlandi.")
+    else:
+        print("Adim sinirina ulasildi; tamamlanmamis gorevler var.")
 
 
 if __name__ == "__main__":
