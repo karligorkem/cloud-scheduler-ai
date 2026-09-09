@@ -38,3 +38,5 @@ data/processed/*
 # Operating system
 Thumbs.db
 .DS_Store
+# Python paket kurulum bilgileri
+*.egg-info/
