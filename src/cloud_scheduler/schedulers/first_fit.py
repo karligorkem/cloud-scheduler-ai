@@ -5,10 +5,14 @@ from cloud_scheduler.domain.server import Server
 
 
 class FirstFitScheduler:
-    """Görevi kabul edebilen ilk sunucuyu seçer."""
+    """Görevi listedeki ilk uygun sunucuya yerleştirir."""
 
-    def select_server(self, cluster: Cluster, job: Job) -> Server | None:
-        """Uygun sunucuyu bulur; görev veya kaynakları değiştirmez."""
+    def select_server(
+        self,
+        cluster: Cluster,
+        job: Job,
+    ) -> Server | None:
+        """Görevi kabul edebilen ilk sunucuyu bulur."""
 
         for server in cluster.servers:
             if server.can_host(job):
@@ -16,23 +20,30 @@ class FirstFitScheduler:
 
         return None
 
-    def schedule_next(self, cluster: Cluster, queue: JobQueue) -> bool:
-        """Kuyruğun ilk görevini mümkünse başlatır."""
+    def schedule_next(
+        self,
+        cluster: Cluster,
+        queue: JobQueue,
+    ) -> bool:
+        """Kuyruğun başındaki görevi uygun sunucuda başlatır."""
 
         job = queue.peek()
 
-        # Kuyruk boşsa başlatılacak görev yoktur.
         if job is None:
             return False
 
         selected_server = self.select_server(cluster, job)
 
-        # Uygun sunucu yoksa görev kuyrukta beklemeye devam eder.
         if selected_server is None:
             return False
 
-        # Önce görevi başlat, başarılı olunca kuyruktan çıkar.
+        # Önce kaynakları ayır ve görevi başlat.
         selected_server.allocate(job)
+
+        # Başarılı atamanın gerçekleştiği zamanı kaydet.
+        job.started_step = cluster.current_step
+
+        # Başlayan görevi bekleme kuyruğundan çıkar.
         queue.pop_next()
 
         return True

@@ -68,6 +68,19 @@ def test_simulation_completes_jobs_and_restores_resources() -> None:
     assert server.available_cpu == 4
     assert server.available_memory_gb == 8.0
     assert server.available_gpu_count == 1
+        # İlk görev hemen başlar ve iki adım sonra biter.
+    assert first_job.arrival_step == 0
+    assert first_job.started_step == 0
+    assert first_job.completed_step == 2
+    assert first_job.waiting_steps == 0
+    assert first_job.turnaround_steps == 2
+
+    # İkinci görev kaynakların boşalmasını iki adım bekler.
+    assert second_job.arrival_step == 0
+    assert second_job.started_step == 2
+    assert second_job.completed_step == 3
+    assert second_job.waiting_steps == 2
+    assert second_job.turnaround_steps == 3
 
 
 def test_simulation_stops_at_limit_when_job_cannot_fit() -> None:
@@ -118,3 +131,10 @@ def test_simulation_stops_at_limit_when_job_cannot_fit() -> None:
     assert server.running_jobs == []
     assert server.available_cpu == 4
     assert server.available_memory_gb == 8.0
+        # Hiç başlayamayan görevin başlama ve bitiş zamanı olmamalı.
+    assert job.started_step is None
+    assert job.completed_step is None
+
+    # Kesinleşmiş bekleme ve toplam süre henüz hesaplanamaz.
+    assert job.waiting_steps is None
+    assert job.turnaround_steps is None

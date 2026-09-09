@@ -33,17 +33,21 @@ class Cluster:
         self.servers.append(server)
 
     def advance_time(self) -> list[Job]:
-        """Bütün sunucuları bir adım ilerletip biten görevleri döndürür."""
+        """Sunucuları bir adım ilerletir ve tamamlanan görevleri döndürür."""
 
         completed_jobs: list[Job] = []
+
+        # Bu adım sona erdiğinde ulaşacağımız zaman.
+        next_step = self.current_step + 1
 
         for server in self.servers:
             server_completed_jobs = server.advance_time()
 
             for job in server_completed_jobs:
+                job.completed_step = next_step
                 completed_jobs.append(job)
 
-        # Bütün sunucular ilerledikten sonra kümenin saatini artır.
-        self.current_step = self.current_step + 1
+        # Bütün sunucular ilerledikten sonra ortak saati güncelle.
+        self.current_step = next_step
 
         return completed_jobs
