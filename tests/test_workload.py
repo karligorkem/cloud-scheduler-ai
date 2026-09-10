@@ -34,3 +34,49 @@ def test_generated_workloads_do_not_share_job_state() -> None:
     assert second_jobs[0].status == JobStatus.WAITING
     assert second_jobs[0].assigned_server_id is None
     assert second_jobs[0].remaining_steps == second_jobs[0].duration_steps
+
+
+
+def test_arrival_window_preserves_resource_requirements() -> None:
+    import inspect
+
+    print("DOSYA:", inspect.getfile(generate_jobs))
+    print("PARAMETRELER:", inspect.signature(generate_jobs))
+    
+    immediate_jobs = generate_jobs(
+        count=20,
+
+        seed=42,
+        max_arrival_step=0,
+    )
+
+    spread_jobs = generate_jobs(
+        count=20,
+        seed=42,
+        max_arrival_step=10,
+    )
+
+    repeated_jobs = generate_jobs(
+        count=20,
+        seed=42,
+        max_arrival_step=10,
+    )
+
+    for immediate, spread, repeated in zip(
+        immediate_jobs,
+        spread_jobs,
+        repeated_jobs,
+    ):
+        # Geliş aralığı kaynak ihtiyaçlarını değiştirmemeli.
+        assert immediate.required_cpu == spread.required_cpu
+        assert immediate.required_memory_gb == spread.required_memory_gb
+        assert immediate.duration_steps == spread.duration_steps
+
+        assert immediate.arrival_step == 0
+        assert 0 <= spread.arrival_step <= 10
+
+        # Aynı parametrelerle geliş zamanları da tekrarlanmalı.
+        assert spread.arrival_step == repeated.arrival_step
+
+    # Bu sabit seed ile en az bir görev başlangıçtan sonra gelmeli.
+    assert any(job.arrival_step > 0 for job in spread_jobs)

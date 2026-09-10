@@ -9,13 +9,13 @@ from cloud_scheduler.schedulers.best_fit import BestFitScheduler
 from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
 from cloud_scheduler.simulation import Simulation
 from cloud_scheduler.workload import generate_jobs
-
+from cloud_scheduler.domain.job import Job
 
 def create_scenario(
     job_count: int,
     seed: int,
-) -> tuple[Cluster, JobQueue]:
-    """Her deney için yeni sunucular ve görevler oluşturur."""
+) -> tuple[Cluster, list[Job]]:
+    """Yeni sunucular ve farklı zamanlarda gelecek görevler oluşturur."""
 
     cluster = Cluster()
 
@@ -35,15 +35,13 @@ def create_scenario(
         )
     )
 
-    jobs = generate_jobs(count=job_count, seed=seed)
+    jobs = generate_jobs(
+        count=job_count,
+        seed=seed,
+        max_arrival_step=10,
+    )
 
-    queue = JobQueue()
-
-    for job in jobs:
-        queue.add(job)
-
-    return cluster, queue
-
+    return cluster, jobs
 
 def run_experiment(
     name: str,
@@ -53,15 +51,19 @@ def run_experiment(
 ) -> dict[str, str | int | float | bool | None]:
     """Bir deney çalıştırır ve ölçümlerini sözlük olarak döndürür."""
 
-    cluster, queue = create_scenario(
+    cluster, jobs = create_scenario(
         job_count=job_count,
         seed=seed,
     )
+
+    # Başlangıçta kuyruk boş.
+    queue = JobQueue()
 
     simulation = Simulation(
         cluster=cluster,
         queue=queue,
         scheduler=scheduler,
+        pending_jobs=jobs,
     )
 
     completed_jobs = simulation.run(max_steps=1000)
@@ -150,7 +152,7 @@ def main() -> None:
                 f" | Ortalama bekleme: {result['average_waiting_steps']}"
             )
 
-    output_path = Path("data/processed/scheduler_comparison.csv")
+    output_path = Path("data/processed/scheduler_comparison_arrivals.csv")
 
     # Klasör yoksa oluştur.
     output_path.parent.mkdir(parents=True, exist_ok=True)
