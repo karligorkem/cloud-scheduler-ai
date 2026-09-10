@@ -2,6 +2,7 @@ from cloud_scheduler.domain.cluster import Cluster
 from cloud_scheduler.domain.job import Job
 from cloud_scheduler.domain.job_queue import JobQueue
 from cloud_scheduler.schedulers.base import Scheduler
+from cloud_scheduler.metrics import ResourceSnapshot, measure_resources
 
 
 class Simulation:
@@ -19,6 +20,8 @@ class Simulation:
         self.scheduler = scheduler
 
         self.completed_jobs: list[Job] = []
+                # Her çalışma aralığı için bir kaynak ölçümü tutar.
+        self.resource_history: list[ResourceSnapshot] = []
 
         # Gelecekte gelecek görevleri geliş zamanına göre sırala.
         if pending_jobs is None:
@@ -59,19 +62,20 @@ class Simulation:
         return True
 
     def step(self) -> list[Job]:
-        """Yeni görevleri kabul eder, yerleştirir ve zamanı ilerletir."""
+        """Görevleri kabul eder, kaynakları ölçer ve zamanı ilerletir."""
 
         if self.is_finished():
             return []
 
-        # Bu zaman adımında gelen görevleri kuyruğa al.
         self.admit_arrivals()
 
-        # Kuyruktan yerleştirilebildiği kadar görev başlat.
         while self.scheduler.schedule_next(self.cluster, self.queue):
             pass
 
-        # Sunucuları ve ortak saati bir adım ilerlet.
+        # Atamalar yapıldıktan sonra, görevler tamamlanmadan önce ölç.
+        snapshot = measure_resources(self.cluster)
+        self.resource_history.append(snapshot)
+
         completed_this_step = self.cluster.advance_time()
 
         self.completed_jobs.extend(completed_this_step)

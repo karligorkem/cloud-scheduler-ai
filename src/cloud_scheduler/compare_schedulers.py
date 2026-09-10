@@ -68,6 +68,31 @@ def run_experiment(
 
     completed_jobs = simulation.run(max_steps=1000)
     finished = simulation.is_finished()
+    total_cpu_utilization = 0.0
+    total_memory_utilization = 0.0
+
+    for snapshot in simulation.resource_history:
+        total_cpu_utilization = (
+            total_cpu_utilization + snapshot.cpu_utilization
+        )
+
+        total_memory_utilization = (
+            total_memory_utilization + snapshot.memory_utilization
+        )
+
+    measured_steps = len(simulation.resource_history)
+
+    average_cpu_utilization = None
+    average_memory_utilization = None
+
+    if measured_steps > 0:
+        average_cpu_utilization = (
+            total_cpu_utilization / measured_steps
+        )
+
+        average_memory_utilization = (
+            total_memory_utilization / measured_steps
+        )
 
     result: dict[str, str | int | float | bool | None] = {
         "scheduler": name,
@@ -79,8 +104,10 @@ def run_experiment(
         "average_waiting_steps": None,
         "max_waiting_steps": None,
         "average_turnaround_steps": None,
+        "measured_steps": measured_steps,
+        "average_cpu_utilization": average_cpu_utilization,
+        "average_memory_utilization": average_memory_utilization,
     }
-
     # Yarım kalan deneyde tam iş yüküne ait ortalama yayımlama.
     if not finished or not completed_jobs:
         return result
@@ -167,6 +194,9 @@ def main() -> None:
         "average_waiting_steps",
         "max_waiting_steps",
         "average_turnaround_steps",
+        "measured_steps",
+        "average_cpu_utilization",
+        "average_memory_utilization",
     ]
 
     with output_path.open(

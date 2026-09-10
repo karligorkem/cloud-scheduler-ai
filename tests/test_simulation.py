@@ -4,7 +4,7 @@ from cloud_scheduler.domain.job_queue import JobQueue
 from cloud_scheduler.domain.server import Server
 from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
 from cloud_scheduler.simulation import Simulation
-
+import pytest
 
 def test_simulation_completes_jobs_and_restores_resources() -> None:
     # Tek sunuculu bir küme oluştur.
@@ -194,3 +194,108 @@ def test_simulation_waits_until_job_arrives() -> None:
     assert job.completed_step == 5
     assert job.turnaround_steps == 2
     assert simulation.is_finished() is True
+
+def test_simulation_records_resources_before_job_finishes() -> None:
+    cluster = Cluster()
+
+    server = Server(
+        server_id="server-1",
+        total_cpu=4,
+        total_memory_gb=8.0,
+    )
+
+    cluster.add_server(server)
+
+    job = Job(
+        job_id="job-1",
+        required_cpu=2,
+        required_memory_gb=2.0,
+        duration_steps=1,
+        arrival_step=1,
+    )
+
+    simulation = Simulation(
+        cluster=cluster,
+        queue=JobQueue(),
+        scheduler=FirstFitScheduler(),
+        pending_jobs=[job],
+    )
+
+    simulation.run(max_steps=10)
+
+    assert simulation.is_finished() is True
+    assert len(simulation.resource_history) == 2
+
+    # 0 → 1 aralığında görev henüz gelmemiştir.
+    idle_snapshot = simulation.resource_history[0]
+
+    assert idle_snapshot.step == 0
+    assert idle_snapshot.cpu_utilization == 0.0
+    assert idle_snapshot.memory_utilization == 0.0
+
+    # 1 → 2 aralığında görev çalışır.
+    busy_snapshot = simulation.resource_history[1]
+
+    assert busy_snapshot.step == 1
+    assert busy_snapshot.cpu_utilization == 0.5
+    assert busy_snapshot.memory_utilization == 0.25
+
+    # Görev bitince kaynaklar boşalır ama geçmiş ölçüm korunur.
+    assert server.available_cpu == 4
+    assert server.available_memory_gb == 8.0
+    assert busy_snapshot.cpu_utilization == 0.5
+
+def test_resource_history_matches_total_job_work() -> None:
+    cluster = Cluster()
+
+    server = Server(
+        server_id="server-1",
+        total_cpu=4,
+        total_memory_gb=8.0,
+    )
+
+    cluster.add_server(server)
+
+    job = Job(
+        job_id="job-1",
+        required_cpu=2,
+        required_memory_gb=4.0,
+        duration_steps=3,
+        arrival_step=2,
+    )
+
+    simulation = Simulation(
+        cluster=cluster,
+        queue=JobQueue(),
+        scheduler=FirstFitScheduler(),
+        pending_jobs=[job],
+    )
+
+    simulation.run(max_steps=10)
+
+    assert simulation.is_finished() is True
+
+    # İki adım boş geçer, görev üç adım çalışır.
+    assert cluster.current_step == 5
+    assert len(simulation.resource_history) == 5
+
+    measured_cpu_steps = 0.0
+    measured_memory_steps = 0.0
+
+    for snapshot in simulation.resource_history:
+        measured_cpu_steps = measured_cpu_steps + (
+            snapshot.cpu_utilization * server.total_cpu
+        )
+
+        measured_memory_steps = measured_memory_steps + (
+            snapshot.memory_utilization * server.total_memory_gb
+        )
+
+    expected_cpu_steps = job.required_cpu * job.duration_steps
+
+    expected_memory_steps = (
+        job.required_memory_gb * job.duration_steps
+    )
+
+    assert measured_cpu_steps == pytest.approx(expected_cpu_steps)
+    assert measured_memory_steps == pytest.approx(expected_memory_steps)
