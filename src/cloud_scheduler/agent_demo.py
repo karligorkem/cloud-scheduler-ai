@@ -8,9 +8,11 @@ from cloud_scheduler.observation import (
     SchedulerObservation,
     build_observation,
 )
+from cloud_scheduler.observation_encoder import ObservationEncoder
+from cloud_scheduler.reward import calculate_reward
 from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
 from cloud_scheduler.simulation import Simulation
-from cloud_scheduler.reward import calculate_reward
+
 
 def choose_action(
     observation: SchedulerObservation,
@@ -18,6 +20,7 @@ def choose_action(
 ) -> int:
     """İlk uygun sunucuyu seçer; uygun sunucu yoksa bekler."""
 
+    # Bekleme eylemi, sunucu indekslerinden sonra gelir.
     wait_action = len(observation.servers)
 
     if observation.next_job is None:
@@ -31,6 +34,7 @@ def choose_action(
 
 
 def main() -> None:
+    # 1. Sunucuyu ve kümeyi oluştur.
     cluster = Cluster()
 
     cluster.add_server(
@@ -41,6 +45,7 @@ def main() -> None:
         )
     )
 
+    # 2. Farklı zamanlarda gelecek iki görev oluştur.
     first_job = Job(
         job_id="job-1",
         required_cpu=4,
@@ -57,6 +62,7 @@ def main() -> None:
         arrival_step=1,
     )
 
+    # 3. Görevleri simülasyona teslim et.
     simulation = Simulation(
         cluster=cluster,
         queue=JobQueue(),
@@ -64,26 +70,37 @@ def main() -> None:
         pending_jobs=[first_job, second_job],
     )
 
-    # İlk karar öncesinde zamanı gelmiş görevleri kabul eder.
+    # İlk karar öncesinde zamanı gelen görevleri kabul eder.
     executor = ActionExecutor(simulation)
+
+    # Gözlemi sabit sırada sayılara dönüştürür.
+    encoder = ObservationEncoder(
+        server_count=len(cluster.servers),
+    )
 
     max_decisions = 20
     total_reward = 0.0
 
+    # 4. Gözlem → karar → eylem → ödül döngüsü.
     for decision_number in range(1, max_decisions + 1):
         if simulation.is_finished():
             break
 
+        # Karar öncesindeki sistem durumunu al.
         observation = build_observation(
             simulation.cluster,
             simulation.queue,
         )
 
+        observation_vector = encoder.encode(observation)
+
+        # Hangi seçimlerin geçerli olduğunu belirle.
         action_mask = build_action_mask(
             simulation.cluster,
             simulation.queue,
         )
 
+        # Şimdilik öğrenmeyen, basit bir politika kullanıyoruz.
         action = choose_action(observation, action_mask)
 
         print(
@@ -91,6 +108,9 @@ def main() -> None:
             f" | Zaman: {observation.current_step}"
             f" | Kuyruk: {observation.queue_length}"
         )
+
+        print(f"Gozlem vektoru: {observation_vector}")
+        print(f"Gecerli eylemler: {action_mask}")
 
         wait_action = len(observation.servers)
 
@@ -104,8 +124,10 @@ def main() -> None:
                 f"{selected_server.server_id} sunucusuna ata"
             )
 
+        # Seçilen eylemi gerçek simülasyon durumuna uygula.
         completed_jobs = executor.apply(action)
-                # Eylem başarılı oldu; karar öncesindeki gözlemle ödülü hesapla.
+
+        # Başarılı eylemin ödülünü eski gözlemden hesapla.
         reward = calculate_reward(observation, action)
         total_reward = total_reward + reward
 
@@ -120,8 +142,10 @@ def main() -> None:
                 f" | Zaman: {job.completed_step}"
             )
 
+    # 5. Deneyin sonucunu göster.
     if not simulation.is_finished():
         print("\nKarar sinirina ulasildi; tamamlanmamis gorevler var.")
+        print(f"Toplam odul: {total_reward:.1f}")
         return
 
     print("\nButun gorevler tamamlandi.")
