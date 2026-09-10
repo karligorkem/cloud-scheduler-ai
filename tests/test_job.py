@@ -106,3 +106,41 @@ def test_job_removes_spaces_from_id() -> None:
     )
 
     assert job.job_id == "job-1"
+
+def test_job_calculates_times_relative_to_arrival() -> None:
+    job = Job(
+        job_id="late-job",
+        required_cpu=2,
+        required_memory_gb=4.0,
+        duration_steps=3,
+        arrival_step=5,
+    )
+
+    # Görev henüz başlamadı ve tamamlanmadı.
+    assert job.arrival_step == 5
+    assert job.waiting_steps is None
+    assert job.turnaround_steps is None
+
+    # Bu testte zaman kayıtlarını elle veriyoruz.
+    job.started_step = 7
+    job.completed_step = 10
+
+    # Görev 5'te geldi, 7'de başladı: 2 adım bekledi.
+    assert job.waiting_steps == 2
+
+    # Görev 5'te geldi, 10'da bitti: sistemde 5 adım geçirdi.
+    assert job.turnaround_steps == 5
+
+
+def test_job_rejects_negative_arrival_step() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Arrival step cannot be negative",
+    ):
+        Job(
+            job_id="invalid-job",
+            required_cpu=2,
+            required_memory_gb=4.0,
+            duration_steps=3,
+            arrival_step=-1,
+        )

@@ -19,6 +19,7 @@ class Job:
         duration_steps: int,
         priority: int = 1,
         required_gpu_count: int = 0,
+        arrival_step: int = 0,
     ) -> None:
         # Geçersiz görev bilgilerini reddet.
         if not job_id.strip():
@@ -38,6 +39,8 @@ class Job:
 
         if required_gpu_count < 0:
             raise ValueError("Required GPU count cannot be negative.")
+        if arrival_step < 0:
+            raise ValueError("Arrival step cannot be negative.")
 
         # Kimlik ve kaynak ihtiyaçları.
         self.job_id = job_id.strip()
@@ -55,7 +58,7 @@ class Job:
         self.assigned_server_id: str | None = None
 
         # Şimdilik bütün görevler sıfırıncı adımda gelir.
-        self.arrival_step: int = 0
+        self.arrival_step: int = arrival_step
 
         # Başlama ve tamamlanma zamanları henüz belli değil.
         self.started_step: int | None = None

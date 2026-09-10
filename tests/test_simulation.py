@@ -138,3 +138,59 @@ def test_simulation_stops_at_limit_when_job_cannot_fit() -> None:
     # Kesinleşmiş bekleme ve toplam süre henüz hesaplanamaz.
     assert job.waiting_steps is None
     assert job.turnaround_steps is None
+
+def test_simulation_waits_until_job_arrives() -> None:
+    cluster = Cluster()
+
+    server = Server(
+        server_id="server-1",
+        total_cpu=4,
+        total_memory_gb=8.0,
+    )
+
+    cluster.add_server(server)
+
+    job = Job(
+        job_id="late-job",
+        required_cpu=2,
+        required_memory_gb=4.0,
+        duration_steps=2,
+        arrival_step=3,
+    )
+
+    simulation = Simulation(
+        cluster=cluster,
+        queue=JobQueue(),
+        scheduler=FirstFitScheduler(),
+        pending_jobs=[job],
+    )
+
+    # Gelecekte gelecek görev varsa simülasyon bitmiş sayılmaz.
+    assert simulation.is_finished() is False
+
+    # Zamanı 0'dan 3'e getir.
+    for _ in range(3):
+        simulation.step()
+
+    # Görev henüz başlamamış ve kaynak tüketmemiş olmalı.
+    assert cluster.current_step == 3
+    assert job.started_step is None
+    assert server.running_jobs == []
+    assert server.available_cpu == 4
+    assert server.available_memory_gb == 8.0
+
+    # 3. adımın başında kabul edilir, ardından bir adım çalışır.
+    simulation.step()
+
+    assert job.started_step == 3
+    assert job.status == JobStatus.RUNNING
+    assert job.remaining_steps == 1
+    assert job.waiting_steps == 0
+
+    # İkinci çalışma adımında tamamlanır.
+    completed_jobs = simulation.step()
+
+    assert completed_jobs == [job]
+    assert job.completed_step == 5
+    assert job.turnaround_steps == 2
+    assert simulation.is_finished() is True
