@@ -5,11 +5,14 @@ from cloud_scheduler.domain.cluster import Cluster
 from cloud_scheduler.domain.job import Job
 from cloud_scheduler.domain.job_queue import JobQueue
 from cloud_scheduler.domain.server import Server
+from cloud_scheduler.scenario import create_simulation
 from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
 from cloud_scheduler.simulation import Simulation
 
 
 def create_environment(max_decisions: int) -> DecisionEnvironment:
+    """Testler için tek sunuculu, tek görevli ortam oluşturur."""
+
     cluster = Cluster()
 
     cluster.add_server(
@@ -43,7 +46,7 @@ def create_environment(max_decisions: int) -> DecisionEnvironment:
 def test_environment_returns_completion_after_assignment_and_wait() -> None:
     environment = create_environment(max_decisions=10)
 
-    # İlk sunucuya ata; zaman ilerlemez.
+    # Görevi sunucuya ata. Zaman henüz ilerlemez.
     assigned = environment.step(0)
 
     assert assigned.reward == 0.0
@@ -53,14 +56,13 @@ def test_environment_returns_completion_after_assignment_and_wait() -> None:
     assert len(assigned.observation) == 10
     assert environment.simulation.cluster.current_step == 0
 
-    # Bekle; bir adımlık görev tamamlanır.
+    # Bir adım bekle. Görev tamamlanır.
     completed = environment.step(1)
 
     assert completed.terminated is True
     assert completed.truncated is False
     assert environment.simulation.cluster.current_step == 1
 
-    # Bitmiş deneyde yeni eylem uygulanamaz.
     with pytest.raises(ValueError, match="Episode has ended"):
         environment.step(1)
 
@@ -68,15 +70,60 @@ def test_environment_returns_completion_after_assignment_and_wait() -> None:
 def test_environment_truncates_when_decision_limit_is_reached() -> None:
     environment = create_environment(max_decisions=1)
 
-    # Görev beklerken zamanı ilerlet.
+    # Görev kuyrukta beklerken bir adım geçir.
     result = environment.step(1)
 
     assert result.reward == -1.0
     assert result.terminated is False
     assert result.truncated is True
-
     assert environment.decision_count == 1
     assert environment.simulation.queue.peek() is not None
 
     with pytest.raises(ValueError, match="Episode has ended"):
         environment.step(0)
+
+
+def test_reset_restores_initial_state_with_same_seed() -> None:
+    environment = DecisionEnvironment(
+        simulation=create_simulation(seed=42),
+        simulation_factory=create_simulation,
+        max_decisions=1,
+    )
+
+    initial_observation = environment.observe()
+    initial_mask = environment.action_masks()
+
+    old_simulation = environment.simulation
+    old_server = old_simulation.cluster.servers[0]
+
+    wait_action = len(old_simulation.cluster.servers)
+
+    # Bir karar vererek karar sınırına ulaş.
+    result = environment.step(wait_action)
+
+    assert result.truncated is True
+    assert environment.closed is True
+    assert environment.decision_count == 1
+    assert old_simulation.cluster.current_step == 1
+    assert len(old_simulation.resource_history) == 1
+
+    # Aynı seed ile yeni bir deney başlat.
+    reset_observation = environment.reset(seed=42)
+
+    assert reset_observation == initial_observation
+    assert environment.action_masks() == initial_mask
+    assert environment.closed is False
+    assert environment.decision_count == 0
+
+    assert environment.simulation.cluster.current_step == 0
+    assert environment.simulation.completed_jobs == []
+    assert environment.simulation.resource_history == []
+
+    # Eski nesneler tekrar kullanılmamalı.
+    assert environment.simulation is not old_simulation
+    assert environment.simulation.cluster.servers[0] is not old_server
+
+    # Yeni deney tekrar eylem kabul etmeli.
+    environment.step(wait_action)
+
+    assert environment.decision_count == 1

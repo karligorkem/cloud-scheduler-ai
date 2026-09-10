@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from cloud_scheduler.action_executor import ActionExecutor
@@ -10,7 +11,7 @@ from cloud_scheduler.simulation import Simulation
 
 @dataclass(frozen=True)
 class DecisionResult:
-    """Bir kararın ardından eğitim döngüsüne verilen sonuç."""
+    """Bir eylemin sonucunu tutar."""
 
     observation: tuple[float, ...]
     action_mask: tuple[bool, ...]
@@ -20,12 +21,13 @@ class DecisionResult:
 
 
 class DecisionEnvironment:
-    """Seçilen eylemi uygular ve yeni durumla ödülü birlikte döndürür."""
+    """Eylemleri uygular ve yeni deneyler baslatir."""
 
     def __init__(
         self,
         simulation: Simulation,
         max_decisions: int = 1000,
+        simulation_factory: Callable[[int], Simulation] | None = None,
     ) -> None:
         if max_decisions <= 0:
             raise ValueError("Max decisions must be greater than zero.")
@@ -37,12 +39,34 @@ class DecisionEnvironment:
             server_count=len(simulation.cluster.servers),
         )
 
+        # Yeni deney olusturacak fonksiyonu sakla.
+        self.simulation_factory = simulation_factory
+
         self.max_decisions = max_decisions
         self.decision_count = 0
         self.closed = simulation.is_finished()
 
+    def reset(self, seed: int = 42) -> tuple[float, ...]:
+        """Yeni bir deney baslatir ve ilk gozlemi dondurur."""
+
+        if self.simulation_factory is None:
+            raise ValueError("Reset requires a simulation factory.")
+
+        new_simulation = self.simulation_factory(seed)
+
+        if len(new_simulation.cluster.servers) != self.encoder.server_count:
+            raise ValueError("Reset must preserve the server count.")
+
+        self.simulation = new_simulation
+        self.executor = ActionExecutor(new_simulation)
+
+        self.decision_count = 0
+        self.closed = new_simulation.is_finished()
+
+        return self.observe()
+
     def observe(self) -> tuple[float, ...]:
-        """Mevcut gözlemi sayı dizisine dönüştürür."""
+        """Mevcut durumu sayisal gozleme donusturur."""
 
         observation = build_observation(
             self.simulation.cluster,
@@ -52,7 +76,7 @@ class DecisionEnvironment:
         return tuple(self.encoder.encode(observation))
 
     def action_masks(self) -> tuple[bool, ...]:
-        """Mevcut durumda geçerli eylemleri verir."""
+        """Gecerli eylemleri gosterir."""
 
         return build_action_mask(
             self.simulation.cluster,
@@ -60,7 +84,7 @@ class DecisionEnvironment:
         )
 
     def step(self, action: int) -> DecisionResult:
-        """Bir karar uygular; bu her zaman zamanı ilerletmez."""
+        """Bir eylem uygular ve sonucunu dondurur."""
 
         if self.closed:
             raise ValueError("Episode has ended.")
@@ -70,7 +94,6 @@ class DecisionEnvironment:
             self.simulation.queue,
         )
 
-        # Geçersiz eylem hata verirse aşağıdaki sayaç güncellenmez.
         self.executor.apply(action)
 
         reward = calculate_reward(previous_observation, action)
