@@ -1,8 +1,8 @@
 from cloud_scheduler.domain.cluster import Cluster
 from cloud_scheduler.domain.job import Job
 from cloud_scheduler.domain.job_queue import JobQueue
-from cloud_scheduler.schedulers.base import Scheduler
 from cloud_scheduler.metrics import ResourceSnapshot, measure_resources
+from cloud_scheduler.schedulers.base import Scheduler
 
 
 class Simulation:
@@ -19,11 +19,13 @@ class Simulation:
         self.queue = queue
         self.scheduler = scheduler
 
+        # Simülasyon boyunca tamamlanan görevler.
         self.completed_jobs: list[Job] = []
-                # Her çalışma aralığı için bir kaynak ölçümü tutar.
+
+        # Her zaman adımındaki kaynak kullanım kayıtları.
         self.resource_history: list[ResourceSnapshot] = []
 
-        # Gelecekte gelecek görevleri geliş zamanına göre sırala.
+        # Henüz kuyruğa alınmamış görevleri geliş zamanına göre sırala.
         if pending_jobs is None:
             self.pending_jobs: list[Job] = []
         else:
@@ -38,16 +40,16 @@ class Simulation:
         while self.pending_jobs:
             next_job = self.pending_jobs[0]
 
-            # İlk görevin bile zamanı gelmediyse sonraki görevler bekler.
+            # Liste sıralı olduğu için ilk görevin zamanı gelmediyse dur.
             if next_job.arrival_step > self.cluster.current_step:
                 break
 
-            # Önce kuyruğa ekle; başarılıysa gelecek görevlerden çıkar.
+            # Kuyruğa ekleme başarılı olduktan sonra listeden çıkar.
             self.queue.add(next_job)
             self.pending_jobs.pop(0)
 
     def is_finished(self) -> bool:
-        """Gelecek, bekleyen veya çalışan görev kalmadığını kontrol eder."""
+        """Gelecek, bekleyen veya çalışan görev kalmadıysa True döndürür."""
 
         if self.pending_jobs:
             return False
@@ -61,26 +63,39 @@ class Simulation:
 
         return True
 
-    def step(self) -> list[Job]:
-        """Görevleri kabul eder, kaynakları ölçer ve zamanı ilerletir."""
+    def advance_one_step(self) -> list[Job]:
+        """Otomatik görev atamadan kaynakları ölçer ve zamanı ilerletir."""
 
         if self.is_finished():
             return []
 
-        self.admit_arrivals()
-
-        while self.scheduler.schedule_next(self.cluster, self.queue):
-            pass
-
-        # Atamalar yapıldıktan sonra, görevler tamamlanmadan önce ölç.
+        # Görevler kaynaklarını bırakmadan önce kullanım ölçümünü al.
         snapshot = measure_resources(self.cluster)
         self.resource_history.append(snapshot)
 
-        completed_this_step = self.cluster.advance_time()
+        # Çalışan görevleri ve ortak saati bir adım ilerlet.
+        completed_jobs = self.cluster.advance_time()
 
-        self.completed_jobs.extend(completed_this_step)
+        # Bu adımda biten görevleri geçmişe ekle.
+        self.completed_jobs.extend(completed_jobs)
 
-        return completed_this_step
+        return completed_jobs
+
+    def step(self) -> list[Job]:
+        """Kural tabanlı zamanlayıcıyla bir zaman adımı çalıştırır."""
+
+        if self.is_finished():
+            return []
+
+        # Önce bu zamanda gelen görevleri kabul et.
+        self.admit_arrivals()
+
+        # Yerleştirilebildiği sürece sıradaki görevi başlat.
+        while self.scheduler.schedule_next(self.cluster, self.queue):
+            pass
+
+        # Atamalar tamamlandı; ölçüm al ve zamanı ilerlet.
+        return self.advance_one_step()
 
     def run(self, max_steps: int = 100) -> list[Job]:
         """En fazla belirtilen sayıda ek zaman adımı çalıştırır."""
@@ -94,4 +109,5 @@ class Simulation:
 
             self.step()
 
+        # İç listeyi doğrudan vermek yerine bir kopyasını döndür.
         return self.completed_jobs.copy()
