@@ -4,6 +4,9 @@ from gymnasium import spaces
 
 from cloud_scheduler.decision_environment import DecisionEnvironment
 from cloud_scheduler.scenario import create_simulation
+from functools import partial
+
+from cloud_scheduler.scenario_config import ScenarioConfig
 
 
 class CloudSchedulerEnv(gym.Env):
@@ -11,12 +14,27 @@ class CloudSchedulerEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, max_decisions: int = 1000) -> None:
+    def __init__(
+        self,
+        max_decisions: int = 1000,
+        config: ScenarioConfig | None = None,
+    ) -> None:
         super().__init__()
 
+        if config is None:
+            config = ScenarioConfig()
+
+        self.config = config
+
+        # Her yeni simülasyonda aynı ayarları kullanacak fonksiyon.
+        simulation_factory = partial(
+            create_simulation,
+            config=self.config,
+        )
+
         self.environment = DecisionEnvironment(
-            simulation=create_simulation(seed=42),
-            simulation_factory=create_simulation,
+            simulation=simulation_factory(seed=42),
+            simulation_factory=simulation_factory,
             max_decisions=max_decisions,
         )
 
@@ -24,12 +42,11 @@ class CloudSchedulerEnv(gym.Env):
             self.environment.simulation.cluster.servers
         )
 
-        # Her sunucu için bir atama ve en sonda bekleme.
+        # Her sunucuya atama ve bir bekleme seçeneği.
         self.action_space = spaces.Discrete(server_count + 1)
 
         observation_size = len(self.environment.observe())
 
-        # Ölçeklenmiş değerler 1'i aşabilir; üst sınırı 1 yapmıyoruz.
         self.observation_space = spaces.Box(
             low=0.0,
             high=np.inf,
