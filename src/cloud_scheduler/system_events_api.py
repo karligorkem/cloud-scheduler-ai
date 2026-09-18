@@ -294,15 +294,121 @@ def get_system_events(
         "events": events,
     }
 
+def select_workload_events(limit: int) -> list[dict]:
+    """Farklı önem seviyelerinden dengeli olaylar seçer."""
+
+    candidate_limit = max(200, limit * 20)
+    candidates = list_saved_events(candidate_limit, None)
+
+    buckets: dict[int, list[dict]] = {
+        1: [],
+        2: [],
+        3: [],
+        4: [],
+    }
+
+    for event in candidates:
+        level_number = event.get("level_number")
+
+        if level_number in (1, 2, 3):
+            bucket = int(level_number)
+        else:
+            bucket = 4
+
+        buckets[bucket].append(event)
+
+    selected: list[dict] = []
+
+    while len(selected) < limit:
+        event_added = False
+
+        # Critical, Error, Warning ve Information sırasıyla seçilir.
+        for level_number in (1, 2, 3, 4):
+            if len(selected) >= limit:
+                break
+
+            if buckets[level_number]:
+                selected.append(
+                    buckets[level_number].pop(0)
+                )
+                event_added = True
+
+        if not event_added:
+            break
+
+    # Simülasyona en eski seçilen olay önce girsin.
+    selected.sort(
+        key=lambda event: str(event.get("time_created") or "")
+    )
+
+    return selected
+
+
+def calculate_job_requirements(
+    event: dict,
+) -> tuple[int, float, int]:
+    """
+    Windows olayını sentetik kaynak ihtiyacına dönüştürür.
+
+    Bunlar gerçek işlem CPU/RAM ölçümleri değildir. Event ID, kayıt
+    numarası ve önem seviyesi kullanılarak tekrarlanabilir bir
+    simülasyon yükü oluşturulur.
+    """
+
+    event_id = int(event.get("event_id") or 0)
+    record_id = int(event.get("record_id") or 0)
+    level_number = event.get("level_number")
+
+    signature = abs(
+        (event_id * 31) + (record_id * 17)
+    )
+
+    if level_number == 1:
+        # Critical: large-server kapasitesinin tamamına yakın yük.
+        required_cpu = 8
+        required_memory_gb = 16.0
+        duration_steps = 8 + (signature % 3)
+
+    elif level_number == 2:
+        # Error: yüksek kaynak ihtiyacı.
+        load_band = signature % 3
+
+        required_cpu = 4 + load_band
+        required_memory_gb = float(8 + (load_band * 2))
+        duration_steps = 6 + (signature % 4)
+
+    elif level_number == 3:
+        # Warning: orta düzey kaynak ihtiyacı.
+        load_band = signature % 3
+
+        required_cpu = 2 + load_band
+        required_memory_gb = float(4 + (load_band * 2))
+        duration_steps = 4 + (signature % 4)
+
+    else:
+        # Information: aynı seviyedeki olaylar da birbirinden farklı olsun.
+        load_band = signature % 4
+
+        required_cpu = 1 + load_band
+        required_memory_gb = float(2 + (load_band * 2))
+        duration_steps = 3 + (signature % 5)
+
+    return (
+        required_cpu,
+        required_memory_gb,
+        duration_steps,
+    )
+
+
 @router.get("/workload")
 def create_workload_from_events(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
-    """Kaydedilmiş Windows olaylarını simülasyon görevlerine dönüştürür."""
+    """Windows olaylarından simülasyon iş yükü oluşturur."""
 
-    saved_events = list_saved_events(limit, None)
+    selected_events = select_workload_events(limit)
 
-    if not saved_events:
+    if not selected_events:
         raise HTTPException(
             status_code=404,
             detail=(
@@ -311,30 +417,14 @@ def create_workload_from_events(
             ),
         )
 
-    # En eski olay önce gelecek şekilde sırala.
-    ordered_events = list(reversed(saved_events))
-
     jobs = []
 
-    for index, event in enumerate(ordered_events):
-        level_number = event["level_number"]
-
-        if level_number == 1:
-            required_cpu = 8
-            required_memory_gb = 16.0
-            duration_steps = 6
-        elif level_number == 2:
-            required_cpu = 4
-            required_memory_gb = 8.0
-            duration_steps = 5
-        elif level_number == 3:
-            required_cpu = 2
-            required_memory_gb = 4.0
-            duration_steps = 3
-        else:
-            required_cpu = 1
-            required_memory_gb = 2.0
-            duration_steps = 2
+    for index, event in enumerate(selected_events):
+        (
+            required_cpu,
+            required_memory_gb,
+            duration_steps,
+        ) = calculate_job_requirements(event)
 
         log_prefix = (
             str(event["log_name"])
@@ -353,46 +443,55 @@ def create_workload_from_events(
                 "required_memory_gb": required_memory_gb,
                 "duration_steps": duration_steps,
                 "required_gpu_count": 0,
-                "arrival_step": index // 2,
+
+                # Her adımda dört göreve kadar geliş sağlayarak
+                # kaynak rekabeti ve bekleme kuyruğu oluştur.
+                "arrival_step": index // 4,
+
                 "source_event": {
                     "identity": event["identity"],
                     "event_id": event["event_id"],
+                    "record_id": event["record_id"],
                     "provider": event["provider"],
                     "level": event["level"],
+                    "level_number": event["level_number"],
                     "log_name": event["log_name"],
                     "time_created": event["time_created"],
                 },
             }
         )
 
-    return {
-        "source": "windows_event_log",
-        "event_count": len(saved_events),
-        "job_count": len(jobs),
-        "mapping": {
-            "critical": {
-                "cpu": 8,
-                "memory_gb": 16,
-                "duration_steps": 6,
-            },
-            "error": {
-                "cpu": 4,
-                "memory_gb": 8,
-                "duration_steps": 5,
-            },
-            "warning": {
-                "cpu": 2,
-                "memory_gb": 4,
-                "duration_steps": 3,
-            },
-            "information": {
-                "cpu": 1,
-                "memory_gb": 2,
-                "duration_steps": 2,
-            },
-        },
-        "jobs": jobs,
+    level_distribution: dict[str, int] = {
+        "critical": 0,
+        "error": 0,
+        "warning": 0,
+        "information": 0,
     }
 
+    for event in selected_events:
+        level_number = event.get("level_number")
+
+        if level_number == 1:
+            level_distribution["critical"] += 1
+        elif level_number == 2:
+            level_distribution["error"] += 1
+        elif level_number == 3:
+            level_distribution["warning"] += 1
+        else:
+            level_distribution["information"] += 1
+
+    return {
+        "source": "windows_event_log",
+        "event_count": len(selected_events),
+        "job_count": len(jobs),
+        "selection": "balanced_by_event_level",
+        "level_distribution": level_distribution,
+        "mapping_notice": (
+            "CPU, RAM ve sure degerleri Event ID ve olay "
+            "seviyesinden uretilen simulasyon degerleridir; "
+            "gercek Windows kaynak olcumleri degildir."
+        ),
+        "jobs": jobs,
+    }
 
 initialize_system_events()

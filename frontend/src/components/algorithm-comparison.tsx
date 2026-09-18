@@ -1,334 +1,487 @@
-import { useRef, useState } from "react";
+import { useMemo, useState } from "react"
 
-import { ComparisonChart } from "@/components/comparison-chart";
-import { Button } from "@/components/ui/button";
+import { useSimulation } from "@/components/simulation-provider"
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card";
+} from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+
+interface ComparisonJob {
+  job_id: string
+  required_cpu: number
+  required_memory_gb: number
+  required_gpu_count: number
+  duration_steps: number
+  arrival_step: number
+}
 
 interface ComparisonRow {
-  algorithm: string;
-  workload_seed: number;
-  completed_count: number;
-  job_count: number;
-  finished: boolean;
-  truncated: boolean;
-  elapsed_steps: number;
-  decision_count: number;
-  total_reward: number;
-  average_waiting: number | null;
-  improvement_percent: number | null;
+  algorithm: string
+  workload_seed?: number
+  completed_count: number
+  total_jobs: number
+  finished?: boolean
+  terminated?: boolean
+  truncated: boolean
+  elapsed?: number
+  elapsed_steps?: number
+  current_step?: number
+  decision_count: number
+  total_reward: number
+  average_waiting: number | null
+  improvement_vs_first_fit?: number | null
+  improvement_percentage?: number | null
 }
 
-interface ComparisonResult {
-  seed: number;
-  workload_seed: number;
-  results: ComparisonRow[];
+interface ComparisonResponse {
+  seed: number
+  workload_seed: number
+  input_mode?: "manual" | "synthetic"
+  job_count?: number
+  results: ComparisonRow[]
 }
 
-const formatter = new Intl.NumberFormat("tr-TR", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatNumber(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "—";
-  return formatter.format(value);
+interface SimulationWithDefinitions {
+  input_mode?: "manual" | "synthetic"
+  job_definitions?: ComparisonJob[]
 }
 
-function formatImprovement(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "—";
+const API_URL = "http://127.0.0.1:8000"
 
-  const rounded = Math.abs(value) < 0.005 ? 0 : value;
-  return `%${formatter.format(rounded)}`;
+const BAR_COLORS: Record<string, string> = {
+  "First Fit": "#4f6f9f",
+  "Best Fit": "#71849f",
+  "Best Fit RAM": "#9aabc1",
+  PPO: "#ff6b0a",
+  "PPO Queue": "#ff963d",
+}
+
+function formatNumber(value: number, digits = 2) {
+  return new Intl.NumberFormat("tr-TR", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value)
+}
+
+function getElapsedSteps(row: ComparisonRow) {
+  return (
+    row.elapsed_steps ??
+    row.elapsed ??
+    row.current_step ??
+    0
+  )
+}
+
+function getImprovement(row: ComparisonRow) {
+  return (
+    row.improvement_vs_first_fit ??
+    row.improvement_percentage ??
+    null
+  )
+}
+
+function getStatus(row: ComparisonRow) {
+  if (row.finished || row.terminated) {
+    return "Tamamlandı"
+  }
+
+  if (row.truncated) {
+    return "Sınırda durduruldu"
+  }
+
+  return "Tamamlanmadı"
+}
+
+async function readErrorMessage(response: Response) {
+  try {
+    const result = (await response.json()) as {
+      detail?: string | Array<{ msg?: string }>
+    }
+
+    if (typeof result.detail === "string") {
+      return result.detail
+    }
+
+    if (Array.isArray(result.detail)) {
+      return result.detail
+        .map((item) => item.msg ?? "Geçersiz veri")
+        .join(", ")
+    }
+  } catch {
+    // JSON olmayan hata yanıtında genel mesaj kullanılacak.
+  }
+
+  return `API hata kodu: ${response.status}`
 }
 
 export function AlgorithmComparison() {
-  const [seed, setSeed] = useState("42");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [result, setResult] = useState<ComparisonResult | null>(null);
+  const { data: simulation } = useSimulation()
 
-  const requestInFlight = useRef(false);
+  const [seed, setSeed] = useState(42)
+  const [result, setResult] =
+    useState<ComparisonResponse | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState("")
 
-  async function compareAlgorithms(): Promise<void> {
-    if (requestInFlight.current) return;
+  const simulationWithDefinitions =
+    simulation as (typeof simulation & SimulationWithDefinitions) | null
 
-    const parsedSeed = Number(seed);
-
+  const activeJobs = useMemo(() => {
     if (
-      seed.trim() === "" ||
-      !Number.isInteger(parsedSeed) ||
-      parsedSeed < 0 ||
-      parsedSeed > 2 ** 31 - 1
+      simulationWithDefinitions?.input_mode === "manual" &&
+      Array.isArray(simulationWithDefinitions.job_definitions) &&
+      simulationWithDefinitions.job_definitions.length > 0
     ) {
-      setError("Seed, 0 ile 2147483647 arasında bir tam sayı olmalı.");
-      return;
+      return simulationWithDefinitions.job_definitions
     }
 
-    requestInFlight.current = true;
-    setBusy(true);
-    setError("");
-    setResult(null);
+    return undefined
+  }, [simulationWithDefinitions])
+
+  const validResults = result?.results.filter(
+    (row) =>
+      row.average_waiting !== null &&
+      Number.isFinite(row.average_waiting),
+  ) ?? []
+
+  const maximumWaiting = Math.max(
+    ...validResults.map(
+      (row) => row.average_waiting as number,
+    ),
+    1,
+  )
+
+  const minimumWaiting =
+    validResults.length > 0
+      ? Math.min(
+          ...validResults.map(
+            (row) => row.average_waiting as number,
+          ),
+        )
+      : null
+
+  async function compareAlgorithms() {
+    if (!Number.isInteger(seed) || seed < 0) {
+      setError(
+        "Karşılaştırma seed’i 0 veya daha büyük bir tam sayı olmalıdır.",
+      )
+      return
+    }
+
+    setIsLoading(true)
+    setError("")
+    setResult(null)
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/compare", {
+      const response = await fetch(`${API_URL}/api/compare`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
-        body: JSON.stringify({ seed: parsedSeed }),
-      });
+        body: JSON.stringify({
+          seed,
+          jobs: activeJobs,
+        }),
+      })
 
       if (!response.ok) {
-        let message = `Karşılaştırma başarısız. HTTP ${response.status}`;
-
-        const body: unknown = await response.json().catch(() => null);
-
-        if (
-          typeof body === "object" &&
-          body !== null &&
-          "detail" in body &&
-          typeof body.detail === "string"
-        ) {
-          message = body.detail;
-        }
-
-        throw new Error(message);
+        throw new Error(await readErrorMessage(response))
       }
 
-      const comparison: ComparisonResult = await response.json();
-      setResult(comparison);
-    } catch (caughtError) {
-      if (caughtError instanceof TypeError) {
-        setError(
-          "Backend'e bağlanılamadı. 8000 portunda çalıştığını kontrol et.",
-        );
-      } else {
-        setError(
-          caughtError instanceof Error
-            ? caughtError.message
-            : "Karşılaştırma sırasında bir hata oluştu.",
-        );
+      const comparison =
+        (await response.json()) as ComparisonResponse
+
+      if (
+        !Array.isArray(comparison.results) ||
+        comparison.results.length === 0
+      ) {
+        throw new Error(
+          "Karşılaştırma API’si sonuç döndürmedi.",
+        )
       }
+
+      setResult(comparison)
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Algoritmalar karşılaştırılamadı.",
+      )
     } finally {
-      requestInFlight.current = false;
-      setBusy(false);
+      setIsLoading(false)
     }
   }
 
   return (
-    <section
-      id="comparison"
-      aria-labelledby="comparison-title"
-      className="min-w-0 scroll-mt-20 px-4 lg:px-6"
-    >
-      <Card className="min-w-0 border-slate-700/70 bg-[#191c22]">
-        <CardHeader>
-          <CardTitle id="comparison-title" className="text-slate-100">
-            Algoritma karşılaştırması
-          </CardTitle>
-          <CardDescription className="text-slate-400">
-            Beş yöntem, aynı görevler. Daha düşük bekleme daha iyi.
-          </CardDescription>
-        </CardHeader>
+    <Card className="border-slate-800 bg-[#171b21] text-slate-100">
+      <CardHeader>
+        <CardTitle>Algoritma karşılaştırması</CardTitle>
 
-        <CardContent className="min-w-0 space-y-6">
-          <form
-            className="flex flex-wrap items-end gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void compareAlgorithms();
-            }}
-          >
-            <div className="space-y-2">
-              <label
-                htmlFor="comparison-seed"
-                className="block text-sm font-medium text-slate-200"
-              >
-                Karşılaştırma seed’i
-              </label>
+        <CardDescription className="text-blue-300/80">
+          Beş zamanlama yöntemini aynı görevler üzerinde
+          karşılaştır. Daha düşük ortalama bekleme daha iyidir.
+        </CardDescription>
+      </CardHeader>
 
-              <input
-                id="comparison-seed"
-                type="number"
-                min={0}
-                max={2147483647}
-                step={1}
-                required
-                value={seed}
-                disabled={busy}
-                onChange={(event) => setSeed(event.target.value)}
-                className="h-10 w-40 rounded-lg border border-slate-600 bg-[#0d0f12] px-3 text-sm text-slate-100 outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 disabled:opacity-50"
-              />
-            </div>
-
-            <Button
-              type="submit"
-              disabled={busy}
-              className="h-10 bg-orange-500 text-black hover:bg-orange-400"
-            >
-              {busy ? "Karşılaştırılıyor…" : "Beş yöntemi karşılaştır"}
-            </Button>
-          </form>
-
-          <p className="text-xs leading-5 text-slate-400">
-            Her yöntem bağımsız bir simülasyonda çalışır. Mevcut canlı
-            deney değişmez. Sonuçlar tek senaryoya aittir; genel başarı
-            sıralaması değildir.
+      <CardContent className="space-y-6">
+        <div
+          className={
+            activeJobs
+              ? "rounded-lg border border-orange-800 bg-orange-950/20 p-4"
+              : "rounded-lg border border-slate-700 bg-[#101722] p-4"
+          }
+        >
+          <p className="font-medium text-slate-100">
+            {activeJobs
+              ? `${activeJobs.length} aktif manuel/Event ID görevi beş yöntemde karşılaştırılacak.`
+              : "Aktif deney sentetik iş yükü kullanıyor."}
           </p>
 
-          {error && (
-            <div
-              role="alert"
-              className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
+          <p className="mt-1 text-sm text-blue-300/80">
+            {activeJobs
+              ? "Karşılaştırmada her algoritmaya aynı görev listesi gönderilecek."
+              : "Karşılaştırmada seçilen seed ile aynı sentetik görevler üretilecek."}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-2">
+            <label
+              htmlFor="comparison-seed"
+              className="text-sm font-medium"
             >
-              {error}
+              Karşılaştırma seed’i
+            </label>
+
+            <Input
+              id="comparison-seed"
+              type="number"
+              min={0}
+              step={1}
+              value={seed}
+              disabled={isLoading}
+              onChange={(event) =>
+                setSeed(Number(event.target.value))
+              }
+              className="w-40 border-slate-600 bg-[#0b0e12]"
+            />
+          </div>
+
+          <Button
+            type="button"
+            onClick={() => void compareAlgorithms()}
+            disabled={isLoading}
+            className="bg-orange-500 text-black hover:bg-orange-400"
+          >
+            {isLoading
+              ? "Karşılaştırılıyor..."
+              : "Beş yöntemi karşılaştır"}
+          </Button>
+        </div>
+
+        <p className="text-xs text-blue-300/80">
+          Her yöntem bağımsız bir simülasyonda çalışır. Mevcut
+          canlı deney değiştirilmez. Sonuçlar tek senaryoya aittir;
+          genel başarı sıralaması değildir.
+        </p>
+
+        {error !== "" && (
+          <div className="rounded-lg border border-red-800 bg-red-950/30 p-4 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
+        {result !== null && (
+          <>
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full border border-slate-700 bg-[#101722] px-3 py-1 text-xs text-blue-200">
+                Sonuç seed’i: {result.seed}
+              </span>
+
+              <span className="rounded-full border border-slate-700 bg-[#101722] px-3 py-1 text-xs text-blue-200">
+                Görev seed’i: {result.workload_seed}
+              </span>
+
+              <span className="rounded-full border border-slate-700 bg-[#101722] px-3 py-1 text-xs text-blue-200">
+                Kaynak:{" "}
+                {result.input_mode === "manual"
+                  ? "Manuel / Event ID"
+                  : "Sentetik"}
+              </span>
+
+              <span className="rounded-full border border-orange-800 bg-orange-950/20 px-3 py-1 text-xs text-orange-400">
+                Görev sayısı:{" "}
+                {result.job_count ??
+                  activeJobs?.length ??
+                  result.results[0]?.total_jobs ??
+                  0}
+              </span>
             </div>
-          )}
 
-          {busy && (
-            <div
-              role="status"
-              className="rounded-lg border border-slate-700 bg-slate-800/50 p-4 text-sm text-slate-300"
-            >
-              Modeller yükleniyor ve beş yöntem aynı görevlerle
-              çalıştırılıyor. İlk karşılaştırma biraz sürebilir.
-            </div>
-          )}
+            <div className="rounded-xl border border-slate-700 bg-[#101722] p-5">
+              <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold">
+                    Ortalama bekleme süresi
+                  </h3>
 
-          {!busy && result === null && !error && (
-            <div className="rounded-xl border border-dashed border-slate-700 p-6 text-center text-sm text-slate-400">
-              Karşılaştırmayı başlattığında grafik ve sonuç tablosu burada
-              görünecek.
-            </div>
-          )}
+                  <p className="text-sm text-blue-300/80">
+                    Daha kısa çubuk, daha az bekleme demektir.
+                  </p>
+                </div>
 
-          {result !== null && (
-            <div className="min-w-0 space-y-6">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="rounded-full border border-slate-700 bg-[#111b2c] px-3 py-1.5 text-slate-300">
-                  Sonuç seed’i: {result.seed}
-                </span>
-
-                <span className="rounded-full border border-slate-700 bg-[#111b2c] px-3 py-1.5 text-slate-300">
-                  Görev seed’i: {result.workload_seed}
-                </span>
-
-                <span className="rounded-full border border-orange-500/30 bg-orange-500/10 px-3 py-1.5 text-orange-400">
-                  Tamamlanan yöntem:{" "}
-                  {result.results.filter((row) => row.finished).length}
-                  {" / "}
-                  {result.results.length}
-                </span>
+                {minimumWaiting !== null && (
+                  <span className="rounded-full border border-orange-800 bg-orange-950/30 px-3 py-1 text-xs text-orange-400">
+                    En düşük:{" "}
+                    {formatNumber(minimumWaiting)} adım
+                  </span>
+                )}
               </div>
 
-              <ComparisonChart results={result.results} />
+              <div className="space-y-5">
+                {result.results.map((row) => {
+                  const waiting = row.average_waiting
+                  const width =
+                    waiting === null
+                      ? 0
+                      : Math.max(
+                          (waiting / maximumWaiting) * 100,
+                          1,
+                        )
 
-              <div className="min-w-0 overflow-x-auto rounded-xl border border-slate-700/80">
-                <table className="w-full min-w-[850px] text-left text-sm">
-                  <caption className="sr-only">
-                    Seed {result.seed} için algoritma karşılaştırma
-                    sonuçları
-                  </caption>
+                  return (
+                    <div key={row.algorithm}>
+                      <div className="mb-2 flex items-center justify-between gap-4">
+                        <span className="font-medium">
+                          {row.algorithm}
+                        </span>
 
-                  <thead className="bg-[#111b2c] text-xs text-slate-300">
-                    <tr>
-                      <th scope="col" className="px-4 py-3">
-                        Yöntem
-                      </th>
-                      <th scope="col" className="px-4 py-3">
-                        Tamamlanan
-                      </th>
-                      <th scope="col" className="px-4 py-3">
-                        Durum
-                      </th>
-                      <th scope="col" className="px-4 py-3 text-right">
-                        Süre
-                      </th>
-                      <th scope="col" className="px-4 py-3 text-right">
-                        Ort. bekleme
-                      </th>
-                      <th scope="col" className="px-4 py-3 text-right">
-                        Toplam ödül
-                      </th>
-                      <th scope="col" className="px-4 py-3 text-right">
-                        First Fit’e göre azalma
-                      </th>
-                    </tr>
-                  </thead>
+                        <span className="font-semibold tabular-nums">
+                          {waiting === null
+                            ? "Tamamlanmadı"
+                            : `${formatNumber(waiting)} adım`}
+                        </span>
+                      </div>
 
-                  <tbody>
-                    {result.results.map((row) => (
+                      <div className="h-8 overflow-hidden rounded-md bg-[#17243a]">
+                        <div
+                          className="h-full rounded-md transition-all duration-500"
+                          style={{
+                            width: `${width}%`,
+                            backgroundColor:
+                              BAR_COLORS[row.algorithm] ??
+                              "#ff6b0a",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-slate-700">
+              <table className="w-full min-w-[1050px] border-collapse text-sm">
+                <thead className="bg-[#101b2d] text-blue-200">
+                  <tr>
+                    <th className="px-4 py-3 text-left">
+                      Yöntem
+                    </th>
+                    <th className="px-4 py-3 text-left">
+                      Tamamlanan
+                    </th>
+                    <th className="px-4 py-3 text-left">
+                      Durum
+                    </th>
+                    <th className="px-4 py-3 text-left">
+                      Süre
+                    </th>
+                    <th className="px-4 py-3 text-left">
+                      Karar sayısı
+                    </th>
+                    <th className="px-4 py-3 text-left">
+                      Ort. bekleme
+                    </th>
+                    <th className="px-4 py-3 text-left">
+                      Toplam ödül
+                    </th>
+                    <th className="px-4 py-3 text-left">
+                      First Fit’e göre
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {result.results.map((row) => {
+                    const improvement = getImprovement(row)
+
+                    return (
                       <tr
                         key={row.algorithm}
-                        className="border-t border-slate-700/70 text-slate-200 even:bg-white/[0.02] hover:bg-white/[0.04]"
+                        className="border-t border-slate-700"
                       >
-                        <th
-                          scope="row"
-                          className="whitespace-nowrap px-4 py-4 font-medium text-orange-400"
-                        >
+                        <td className="px-4 py-4 font-semibold text-orange-400">
                           {row.algorithm}
-                        </th>
+                        </td>
+
+                        <td className="px-4 py-4">
+                          {row.completed_count} /{" "}
+                          {row.total_jobs ??
+                           result.job_count ??
+                           activeJobs?.length ??
+                           0}
+                        </td>
+
+                        <td className="px-4 py-4">
+                          {getStatus(row)}
+                        </td>
 
                         <td className="px-4 py-4 tabular-nums">
-                          {row.completed_count} / {row.job_count}
+                          {getElapsedSteps(row)} adım
                         </td>
 
-                        <td className="whitespace-nowrap px-4 py-4">
-                          <span
-                            className={
-                              row.finished
-                                ? "text-slate-200"
-                                : "text-orange-400"
-                            }
-                          >
-                            {row.finished
-                              ? "Tamamlandı"
-                              : row.truncated
-                                ? "Karar sınırında durdu"
-                                : "Tamamlanmadı"}
-                          </span>
+                        <td className="px-4 py-4 tabular-nums">
+                          {row.decision_count}
                         </td>
 
-                        <td className="whitespace-nowrap px-4 py-4 text-right tabular-nums">
-                          {row.elapsed_steps} adım
+                        <td className="px-4 py-4 tabular-nums">
+                          {row.average_waiting === null
+                            ? "—"
+                            : formatNumber(
+                                row.average_waiting,
+                              )}
                         </td>
 
-                        <td className="px-4 py-4 text-right tabular-nums">
-                          {row.finished
-                            ? formatNumber(row.average_waiting)
-                            : "—"}
-                        </td>
-
-                        <td className="px-4 py-4 text-right tabular-nums">
+                        <td className="px-4 py-4 tabular-nums">
                           {formatNumber(row.total_reward)}
                         </td>
 
-                        <td className="px-4 py-4 text-right tabular-nums">
-                          {row.finished
-                            ? formatImprovement(row.improvement_percent)
-                            : "—"}
+                        <td className="px-4 py-4 tabular-nums">
+                          {improvement === null
+                            ? "—"
+                            : `%${formatNumber(improvement)}`}
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <p className="text-xs leading-5 text-slate-400">
-                Pozitif azalma daha az bekleme, negatif değer daha fazla
-                bekleme demektir. Tamamlanmayan deneylerde bekleme
-                karşılaştırması yapılmaz.
-              </p>
+                    )
+                  })}
+                </tbody>
+              </table>
             </div>
-          )}
-        </CardContent>
-      </Card>
-    </section>
-  );
+
+            <p className="text-xs text-blue-300/80">
+              Pozitif iyileşme daha az bekleme, negatif değer daha
+              fazla bekleme anlamına gelir. Tamamlanmayan deneylerde
+              bekleme karşılaştırması yapılmaz.
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
 }

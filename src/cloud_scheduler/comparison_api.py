@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal, Sequence
 
 import numpy as np
 from fastapi import APIRouter, HTTPException
@@ -6,10 +7,15 @@ from pydantic import BaseModel, Field
 from sb3_contrib import MaskablePPO
 
 from cloud_scheduler.gym_environment import CloudSchedulerEnv
-from cloud_scheduler.queue_gym_environment import QueueAwareCloudSchedulerEnv
-from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
+from cloud_scheduler.queue_gym_environment import (
+    QueueAwareCloudSchedulerEnv,
+)
+from cloud_scheduler.scenario import JobDefinition
 from cloud_scheduler.schedulers.best_fit import BestFitScheduler
-from cloud_scheduler.schedulers.best_fit_ram import BestFitRamScheduler
+from cloud_scheduler.schedulers.best_fit_ram import (
+    BestFitRamScheduler,
+)
+from cloud_scheduler.schedulers.first_fit import FirstFitScheduler
 
 
 router = APIRouter(
@@ -17,20 +23,119 @@ router = APIRouter(
     tags=["Comparison"],
 )
 
-# Dosyanın konumundan proje ana klasörünü bul.
-project_root = Path(__file__).resolve().parents[2]
+AlgorithmName = Literal[
+    "First Fit",
+    "Best Fit",
+    "Best Fit RAM",
+    "PPO",
+    "PPO Queue",
+]
 
-model_paths = {
-    "PPO": project_root / "outputs/ppo_long_run/scheduler_ppo.zip",
-    "PPO Queue": project_root / "outputs/ppo_queue_run/scheduler_ppo.zip",
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+MODEL_PATHS = {
+    "PPO": (
+        PROJECT_ROOT
+        / "outputs"
+        / "ppo_long_run"
+        / "scheduler_ppo.zip"
+    ),
+    "PPO Queue": (
+        PROJECT_ROOT
+        / "outputs"
+        / "ppo_queue_run"
+        / "scheduler_ppo.zip"
+    ),
+}
+
+SCHEDULERS = {
+    "First Fit": FirstFitScheduler(),
+    "Best Fit": BestFitScheduler(),
+    "Best Fit RAM": BestFitRamScheduler(),
 }
 
 
+class ComparisonJobRequest(BaseModel):
+    job_id: str = Field(min_length=1, max_length=80)
+    required_cpu: int = Field(ge=1, le=8)
+    required_memory_gb: float = Field(gt=0, le=16)
+    duration_steps: int = Field(ge=1, le=1000)
+    required_gpu_count: int = Field(default=0, ge=0, le=0)
+    arrival_step: int = Field(default=0, ge=0)
+
+
 class ComparisonRequest(BaseModel):
-    seed: int = Field(
-        default=42,
-        ge=0,
-        le=2**31 - 1,
+    seed: int = Field(default=42, ge=0, le=2**31 - 1)
+    jobs: list[ComparisonJobRequest] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+
+
+def convert_job_definitions(
+    jobs: list[ComparisonJobRequest] | None,
+) -> tuple[JobDefinition, ...] | None:
+    if jobs is None:
+        return None
+
+    normalized_ids = [
+        job.job_id.replace(" ", "").lower()
+        for job in jobs
+    ]
+
+    if any(job_id == "" for job_id in normalized_ids):
+        raise HTTPException(
+            status_code=422,
+            detail="Gorev kimligi bos olamaz.",
+        )
+
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise HTTPException(
+            status_code=422,
+            detail="Gorev kimlikleri benzersiz olmali.",
+        )
+
+    return tuple(
+        JobDefinition(
+            job_id=job.job_id,
+            required_cpu=job.required_cpu,
+            required_memory_gb=job.required_memory_gb,
+            duration_steps=job.duration_steps,
+            required_gpu_count=job.required_gpu_count,
+            arrival_step=job.arrival_step,
+        )
+        for job in jobs
+    )
+
+
+def choose_rule_action(
+    algorithm: str,
+    environment: CloudSchedulerEnv,
+) -> int:
+    simulation = environment.environment.simulation
+    servers = simulation.cluster.servers
+    wait_action = len(servers)
+
+    job = simulation.queue.peek()
+
+    if job is None:
+        return wait_action
+
+    selected_server = SCHEDULERS[algorithm].select_server(
+        simulation.cluster,
+        job,
+    )
+
+    if selected_server is None:
+        return wait_action
+
+    for index, server in enumerate(servers):
+        if server.server_id == selected_server.server_id:
+            return index
+
+    raise RuntimeError(
+        "Selected server is not in the cluster."
     )
 
 
@@ -38,46 +143,46 @@ def evaluate_method(
     algorithm: str,
     seed: int,
     models: dict[str, MaskablePPO],
+    job_definitions: Sequence[JobDefinition] | None,
 ) -> dict:
-    """Bir yöntemi bağımsız bir simülasyonda değerlendirir."""
-
     if algorithm == "PPO Queue":
-        environment = QueueAwareCloudSchedulerEnv(max_decisions=2000)
+        environment = QueueAwareCloudSchedulerEnv(
+            max_decisions=2000,
+            job_definitions=job_definitions,
+        )
     else:
-        environment = CloudSchedulerEnv(max_decisions=2000)
-
-    schedulers = {
-        "First Fit": FirstFitScheduler(),
-        "Best Fit": BestFitScheduler(),
-        "Best Fit RAM": BestFitRamScheduler(),
-    }
+        environment = CloudSchedulerEnv(
+            max_decisions=2000,
+            job_definitions=job_definitions,
+        )
 
     try:
         observation, info = environment.reset(seed=seed)
-        workload_seed = info["episode_seed"]
 
-        # Modelin giriş ve çıkış boyutlarını doğrula.
         if algorithm in models:
             model = models[algorithm]
 
             if (
                 model.observation_space.shape
                 != environment.observation_space.shape
-                or model.action_space.n != environment.action_space.n
             ):
-                raise ValueError(
-                    f"{algorithm}: model ve ortam uyumsuz."
+                raise RuntimeError(
+                    f"{algorithm} observation shape mismatch."
+                )
+
+            if (
+                model.action_space.n
+                != environment.action_space.n
+            ):
+                raise RuntimeError(
+                    f"{algorithm} action count mismatch."
                 )
 
         total_reward = 0.0
+        terminated = False
+        truncated = False
 
-        while True:
-            simulation = environment.environment.simulation
-            servers = simulation.cluster.servers
-
-            # Varsayılan eylem: bekle.
-            action = len(servers)
-
+        while not terminated and not truncated:
             if algorithm in models:
                 prediction, _ = models[algorithm].predict(
                     observation,
@@ -85,23 +190,14 @@ def evaluate_method(
                     deterministic=True,
                 )
 
-                action = int(np.asarray(prediction).item())
-
+                action = int(
+                    np.asarray(prediction).item()
+                )
             else:
-                job = simulation.queue.peek()
-
-                if job is not None:
-                    selected_server = schedulers[algorithm].select_server(
-                        simulation.cluster,
-                        job,
-                    )
-
-                    if selected_server is not None:
-                        action = next(
-                            index
-                            for index, server in enumerate(servers)
-                            if server.server_id == selected_server.server_id
-                        )
+                action = choose_rule_action(
+                    algorithm,
+                    environment,
+                )
 
             (
                 observation,
@@ -113,84 +209,85 @@ def evaluate_method(
 
             total_reward += float(reward)
 
-            if terminated or truncated:
-                break
-
         simulation = environment.environment.simulation
         completed_jobs = simulation.completed_jobs
 
         finished = (
             terminated
             and not truncated
-            and len(completed_jobs) == environment.config.job_count
+            and len(completed_jobs) == environment.job_count
         )
+
+        waiting_times = [
+            job.waiting_steps
+            for job in completed_jobs
+            if job.waiting_steps is not None
+        ]
 
         average_waiting = None
 
-        if finished:
-            waiting_times = []
+        if finished and waiting_times:
+            average_waiting = (
+                sum(waiting_times) / len(waiting_times)
+            )
 
-            for job in completed_jobs:
-                waiting = job.waiting_steps
-
-                if waiting is None:
-                    raise ValueError(
-                        "Tamamlanan gorevin bekleme suresi eksik."
-                    )
-
-                waiting_times.append(waiting)
-
-            total_waiting = sum(waiting_times)
-
-            if not np.isclose(total_reward, -total_waiting):
-                raise ValueError(
-                    "Odul ve toplam bekleme uyusmuyor."
+            if not np.isclose(
+                total_reward,
+                -sum(waiting_times),
+            ):
+                raise RuntimeError(
+                    f"{algorithm} reward and waiting mismatch."
                 )
-
-            average_waiting = total_waiting / len(completed_jobs)
 
         return {
             "algorithm": algorithm,
-            "workload_seed": workload_seed,
+            "workload_seed": info["episode_seed"],
             "completed_count": len(completed_jobs),
-            "job_count": environment.config.job_count,
+            "job_count": environment.job_count,
             "finished": finished,
             "truncated": truncated,
-            "elapsed_steps": simulation.cluster.current_step,
-            "decision_count": environment.environment.decision_count,
+            "elapsed_steps": (
+                simulation.cluster.current_step
+            ),
+            "decision_count": (
+                environment.environment.decision_count
+            ),
             "total_reward": total_reward,
             "average_waiting": average_waiting,
         }
-
     finally:
         environment.close()
 
 
 @router.post("/compare")
-def compare_algorithms(request: ComparisonRequest) -> dict:
-    """Beş yöntemi aynı seed ile karşılaştırır."""
-
-    # Eksik model varsa deneyleri başlatmadan hata ver.
-    for name, path in model_paths.items():
-        if not path.is_file():
+def compare_algorithms(
+    request: ComparisonRequest,
+) -> dict:
+    for algorithm, model_path in MODEL_PATHS.items():
+        if not model_path.is_file():
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"{name} model dosyasi bulunamadi: "
-                    f"{path.parent.name}/{path.name}"
+                    f"{algorithm} model dosyasi "
+                    f"bulunamadi: {model_path}"
                 ),
             )
 
-    try:
-        models: dict[str, MaskablePPO] = {}
+    job_definitions = convert_job_definitions(
+        request.jobs
+    )
 
-        for name, path in model_paths.items():
-            models[name] = MaskablePPO.load(
-                str(path),
+    try:
+        models = {
+            algorithm: MaskablePPO.load(
+                str(model_path),
                 device="cpu",
             )
+            for algorithm, model_path
+            in MODEL_PATHS.items()
+        }
 
-        methods = [
+        algorithms = [
             "First Fit",
             "Best Fit",
             "Best Fit RAM",
@@ -200,49 +297,68 @@ def compare_algorithms(request: ComparisonRequest) -> dict:
 
         results = [
             evaluate_method(
-                algorithm=method,
+                algorithm=algorithm,
                 seed=request.seed,
                 models=models,
+                job_definitions=job_definitions,
             )
-            for method in methods
+            for algorithm in algorithms
         ]
 
-        # Bütün yöntemler aynı görev üretim seed'ini kullanmalı.
         workload_seeds = {
-            row["workload_seed"]
-            for row in results
+            result["workload_seed"]
+            for result in results
         }
 
         if len(workload_seeds) != 1:
-            raise ValueError(
-                "Yontemler farkli gorev seed'leri kullandi."
+            raise RuntimeError(
+                "Algorithms used different workload seeds."
             )
 
-        baseline = results[0]["average_waiting"]
+        first_fit_waiting = results[0][
+            "average_waiting"
+        ]
 
-        for row in results:
-            waiting = row["average_waiting"]
-            improvement = None
+        for result in results:
+            waiting = result["average_waiting"]
 
             if (
-                baseline is not None
-                and baseline > 0
-                and waiting is not None
+                first_fit_waiting is None
+                or waiting is None
             ):
-                improvement = (
-                    100 * (baseline - waiting) / baseline
+                result["improvement_percent"] = None
+            elif first_fit_waiting == 0:
+                result["improvement_percent"] = (
+                    0.0 if waiting == 0 else None
                 )
-
-            row["improvement_percent"] = improvement
+            else:
+                result["improvement_percent"] = (
+                    100.0
+                    * (first_fit_waiting - waiting)
+                    / first_fit_waiting
+                )
 
         return {
             "seed": request.seed,
-            "workload_seed": results[0]["workload_seed"],
+            "workload_seed": results[0][
+                "workload_seed"
+            ],
+            "input_mode": (
+                "manual"
+                if job_definitions is not None
+                else "synthetic"
+            ),
+            "job_count": (
+                len(job_definitions)
+                if job_definitions is not None
+                else results[0]["job_count"]
+            ),
             "results": results,
         }
-
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Karsilastirma tamamlanamadi: {exc}",
+            detail=f"Karsilastirma basarisiz: {exc}",
         ) from exc

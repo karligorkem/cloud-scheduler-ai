@@ -31,6 +31,14 @@ export interface SimulationServer {
   available_gpu: number;
   running_jobs: SimulationJob[];
 }
+export interface SimulationJobDefinition {
+  job_id: string;
+  required_cpu: number;
+  required_memory_gb: number;
+  duration_steps: number;
+  required_gpu_count: number;
+  arrival_step: number;
+}
 
 export interface SimulationState {
   algorithm: string;
@@ -45,6 +53,7 @@ export interface SimulationState {
   running_count: number;
   completed_count: number;
   average_waiting_completed: number | null;
+  job_definitions?: SimulationJobDefinition[];
   total_reward: number;
   terminated: boolean;
   truncated: boolean;
