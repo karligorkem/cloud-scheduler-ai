@@ -15,6 +15,7 @@ outputs/
 .coverage
 htmlcov/
 
+/data/*.sqlite3*
 # IDE
 .vscode/
 .idea/

@@ -1,16 +1,17 @@
+from functools import partial
+from typing import Sequence
+
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
 from cloud_scheduler.decision_environment import DecisionEnvironment
-from cloud_scheduler.scenario import create_simulation
-from functools import partial
-
+from cloud_scheduler.scenario import JobDefinition, create_simulation
 from cloud_scheduler.scenario_config import ScenarioConfig
 
 
 class CloudSchedulerEnv(gym.Env):
-    """Karar ortamını Gymnasium arayüzüne bağlar."""
+    """Cloud Scheduler karar ortamını Gymnasium arayüzüne bağlar."""
 
     metadata = {"render_modes": []}
 
@@ -18,6 +19,7 @@ class CloudSchedulerEnv(gym.Env):
         self,
         max_decisions: int = 1000,
         config: ScenarioConfig | None = None,
+        job_definitions: Sequence[JobDefinition] | None = None,
     ) -> None:
         super().__init__()
 
@@ -26,10 +28,22 @@ class CloudSchedulerEnv(gym.Env):
 
         self.config = config
 
-        # Her yeni simülasyonda aynı ayarları kullanacak fonksiyon.
+        self.job_definitions = (
+            tuple(job_definitions)
+            if job_definitions is not None
+            else None
+        )
+
+        self.job_count = (
+            len(self.job_definitions)
+            if self.job_definitions is not None
+            else self.config.job_count
+        )
+
         simulation_factory = partial(
             create_simulation,
             config=self.config,
+            job_definitions=self.job_definitions,
         )
 
         self.environment = DecisionEnvironment(
@@ -42,7 +56,6 @@ class CloudSchedulerEnv(gym.Env):
             self.environment.simulation.cluster.servers
         )
 
-        # Her sunucuya atama ve bir bekleme seçeneği.
         self.action_space = spaces.Discrete(server_count + 1)
 
         observation_size = len(self.environment.observe())
@@ -61,31 +74,42 @@ class CloudSchedulerEnv(gym.Env):
 
         super().reset(seed=seed)
 
-        # Gymnasium'un rastgele sayı kaynağından deney seed'i üret.
         episode_seed = int(
             self.np_random.integers(0, 2**31 - 1)
         )
 
-        observation = self.environment.reset(seed=episode_seed)
+        observation = self.environment.reset(
+            seed=episode_seed,
+        )
+
         self.has_reset = True
 
         info = {
             "episode_seed": episode_seed,
             "action_mask": self.action_masks(),
+            "input_mode": (
+                "manual"
+                if self.job_definitions is not None
+                else "synthetic"
+            ),
         }
 
-        return np.asarray(observation, dtype=np.float32), info
+        return (
+            np.asarray(observation, dtype=np.float32),
+            info,
+        )
 
     def step(self, action):
-        """Bir eylem uygular ve Gymnasium biçiminde sonuç döndürür."""
+        """Bir eylem uygular ve Gymnasium sonucunu döndürür."""
 
         if not self.has_reset:
             raise RuntimeError("Call reset before step.")
 
         if not self.action_space.contains(action):
-            raise ValueError("Action is outside the action space.")
+            raise ValueError(
+                "Action is outside the action space."
+            )
 
-        # NumPy tam sayısını mevcut executor'ın istediği Python int'e çevir.
         result = self.environment.step(int(action))
 
         observation = np.asarray(
@@ -115,7 +139,7 @@ class CloudSchedulerEnv(gym.Env):
         )
 
     def action_masks(self):
-        """Maske destekleyen politika için geçerli eylemleri verir."""
+        """Geçerli eylemleri maske biçiminde döndürür."""
 
         return np.asarray(
             self.environment.action_masks(),

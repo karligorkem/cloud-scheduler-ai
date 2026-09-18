@@ -21,6 +21,11 @@ dev = [
 rl = [
     "sb3-contrib>=2.7,<3",
 ]
+api = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
