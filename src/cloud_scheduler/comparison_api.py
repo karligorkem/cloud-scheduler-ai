@@ -362,3 +362,413 @@ def compare_algorithms(
             status_code=500,
             detail=f"Karsilastirma basarisiz: {exc}",
         ) from exc
+    
+class BenchmarkRequest(BaseModel):
+    base_seed: int = Field(
+        default=42,
+        ge=0,
+        le=2**31 - 1,
+    )
+    run_count: int = Field(
+        default=10,
+        ge=2,
+        le=50,
+    )
+    jobs: list[ComparisonJobRequest] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+
+
+def create_run_seed(
+    base_seed: int,
+    run_index: int,
+) -> int:
+    """Her benchmark deneyi için tekrarlanabilir seed üretir."""
+
+    maximum_seed = (2**31) - 1
+
+    return (
+        base_seed + (run_index * 7919)
+    ) % maximum_seed
+
+
+def create_manual_workload_variant(
+    job_definitions: Sequence[JobDefinition],
+    seed: int,
+    run_index: int,
+) -> tuple[JobDefinition, ...]:
+    """
+    Aynı görevleri korur fakat geliş sırasını değiştirir.
+
+    İlk deney orijinal görev sırasını kullanır. Sonraki deneylerde
+    CPU, RAM ve süre değerleri değişmez; yalnızca görevlerin geliş
+    sırası seed kullanılarak yeniden düzenlenir.
+    """
+
+    original_jobs = tuple(job_definitions)
+
+    if run_index == 0:
+        return original_jobs
+
+    random_generator = np.random.default_rng(seed)
+
+    shuffled_indexes = random_generator.permutation(
+        len(original_jobs)
+    )
+
+    arrival_steps = sorted(
+        job.arrival_step
+        for job in original_jobs
+    )
+
+    variants: list[JobDefinition] = []
+
+    for position, shuffled_index in enumerate(
+        shuffled_indexes
+    ):
+        original_job = original_jobs[
+            int(shuffled_index)
+        ]
+
+        variants.append(
+            JobDefinition(
+                job_id=original_job.job_id,
+                required_cpu=original_job.required_cpu,
+                required_memory_gb=(
+                    original_job.required_memory_gb
+                ),
+                duration_steps=(
+                    original_job.duration_steps
+                ),
+                required_gpu_count=(
+                    original_job.required_gpu_count
+                ),
+                arrival_step=arrival_steps[position],
+            )
+        )
+
+    return tuple(variants)
+
+
+def calculate_optional_mean(
+    values: list[float],
+) -> float | None:
+    if not values:
+        return None
+
+    return float(np.mean(values))
+
+
+def calculate_optional_standard_deviation(
+    values: list[float],
+) -> float | None:
+    if not values:
+        return None
+
+    return float(np.std(values))
+
+
+@router.post("/benchmark")
+def benchmark_algorithms(
+    request: BenchmarkRequest,
+) -> dict:
+    """
+    Algoritmaları birden fazla senaryoda değerlendirir.
+
+    Sentetik modda her deney farklı seed ile yeni görevler üretir.
+    Manuel modda aynı görevlerin geliş sırası değiştirilir.
+    """
+
+    for algorithm, model_path in MODEL_PATHS.items():
+        if not model_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"{algorithm} model dosyasi "
+                    f"bulunamadi: {model_path}"
+                ),
+            )
+
+    base_job_definitions = convert_job_definitions(
+        request.jobs
+    )
+
+    algorithms = [
+        "First Fit",
+        "Best Fit",
+        "Best Fit RAM",
+        "PPO",
+        "PPO Queue",
+    ]
+
+    try:
+        models = {
+            algorithm: MaskablePPO.load(
+                str(model_path),
+                device="cpu",
+            )
+            for algorithm, model_path
+            in MODEL_PATHS.items()
+        }
+
+        runs: list[dict] = []
+
+        win_counts = {
+            algorithm: 0
+            for algorithm in algorithms
+        }
+
+        exclusive_win_counts = {
+            algorithm: 0
+            for algorithm in algorithms
+        }
+
+        for run_index in range(
+            request.run_count
+        ):
+            run_seed = create_run_seed(
+                request.base_seed,
+                run_index,
+            )
+
+            if base_job_definitions is None:
+                run_job_definitions = None
+            else:
+                run_job_definitions = (
+                    create_manual_workload_variant(
+                        job_definitions=(
+                            base_job_definitions
+                        ),
+                        seed=run_seed,
+                        run_index=run_index,
+                    )
+                )
+
+            run_results = [
+                evaluate_method(
+                    algorithm=algorithm,
+                    seed=run_seed,
+                    models=models,
+                    job_definitions=(
+                        run_job_definitions
+                    ),
+                )
+                for algorithm in algorithms
+            ]
+
+            completed_results = [
+                result
+                for result in run_results
+                if (
+                    result["finished"]
+                    and result["average_waiting"]
+                    is not None
+                )
+            ]
+
+            winners: list[str] = []
+
+            if completed_results:
+                best_waiting = min(
+                    float(
+                        result["average_waiting"]
+                    )
+                    for result in completed_results
+                )
+
+                winners = [
+                    str(result["algorithm"])
+                    for result in completed_results
+                    if np.isclose(
+                        float(
+                            result[
+                                "average_waiting"
+                            ]
+                        ),
+                        best_waiting,
+                    )
+                ]
+
+                for winner in winners:
+                    win_counts[winner] += 1
+
+                if len(winners) == 1:
+                    exclusive_win_counts[
+                        winners[0]
+                    ] += 1
+
+            runs.append(
+                {
+                    "run_number": run_index + 1,
+                    "seed": run_seed,
+                    "winner_algorithms": winners,
+                    "results": run_results,
+                }
+            )
+
+        summaries = []
+
+        for algorithm in algorithms:
+            algorithm_results = [
+                result
+                for run in runs
+                for result in run["results"]
+                if result["algorithm"] == algorithm
+            ]
+
+            completed_results = [
+                result
+                for result in algorithm_results
+                if (
+                    result["finished"]
+                    and result["average_waiting"]
+                    is not None
+                )
+            ]
+
+            waiting_values = [
+                float(result["average_waiting"])
+                for result in completed_results
+            ]
+
+            reward_values = [
+                float(result["total_reward"])
+                for result in algorithm_results
+            ]
+
+            elapsed_values = [
+                float(result["elapsed_steps"])
+                for result in algorithm_results
+            ]
+
+            decision_values = [
+                float(result["decision_count"])
+                for result in algorithm_results
+            ]
+
+            summaries.append(
+                {
+                    "algorithm": algorithm,
+                    "run_count": request.run_count,
+                    "completed_runs": len(
+                        completed_results
+                    ),
+                    "failed_runs": (
+                        request.run_count
+                        - len(completed_results)
+                    ),
+                    "mean_waiting": (
+                        calculate_optional_mean(
+                            waiting_values
+                        )
+                    ),
+                    "std_waiting": (
+                        calculate_optional_standard_deviation(
+                            waiting_values
+                        )
+                    ),
+                    "minimum_waiting": (
+                        min(waiting_values)
+                        if waiting_values
+                        else None
+                    ),
+                    "maximum_waiting": (
+                        max(waiting_values)
+                        if waiting_values
+                        else None
+                    ),
+                    "mean_reward": (
+                        calculate_optional_mean(
+                            reward_values
+                        )
+                    ),
+                    "mean_elapsed_steps": (
+                        calculate_optional_mean(
+                            elapsed_values
+                        )
+                    ),
+                    "mean_decision_count": (
+                        calculate_optional_mean(
+                            decision_values
+                        )
+                    ),
+                    "win_count": (
+                        win_counts[algorithm]
+                    ),
+                    "exclusive_win_count": (
+                        exclusive_win_counts[
+                            algorithm
+                        ]
+                    ),
+                }
+            )
+
+        ranked_summaries = sorted(
+            summaries,
+            key=lambda summary: (
+                summary["mean_waiting"] is None,
+                (
+                    summary["mean_waiting"]
+                    if summary["mean_waiting"]
+                    is not None
+                    else float("inf")
+                ),
+                -summary["completed_runs"],
+            ),
+        )
+
+        for rank, summary in enumerate(
+            ranked_summaries,
+            start=1,
+        ):
+            summary["rank"] = rank
+
+        best_algorithm = (
+            ranked_summaries[0]["algorithm"]
+            if (
+                ranked_summaries
+                and ranked_summaries[0][
+                    "mean_waiting"
+                ] is not None
+            )
+            else None
+        )
+
+        return {
+            "base_seed": request.base_seed,
+            "run_count": request.run_count,
+            "input_mode": (
+                "manual"
+                if base_job_definitions is not None
+                else "synthetic"
+            ),
+            "workload_strategy": (
+                "seeded_arrival_permutations"
+                if base_job_definitions is not None
+                else "synthetic_seed_series"
+            ),
+            "job_count": (
+                len(base_job_definitions)
+                if base_job_definitions is not None
+                else (
+                    runs[0]["results"][0][
+                        "job_count"
+                    ]
+                    if runs
+                    else 0
+                )
+            ),
+            "best_algorithm": best_algorithm,
+            "summaries": ranked_summaries,
+            "runs": runs,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Benchmark basarisiz: {exc}",
+        ) from exc

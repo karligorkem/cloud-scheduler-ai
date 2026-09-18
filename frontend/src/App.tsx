@@ -1,4 +1,5 @@
 import { AppSidebar } from "@/components/app-sidebar";
+import { BenchmarkPanel } from "@/components/benchmark-panel"
 import { SectionCards } from "@/components/section-cards";
 import { SimulationControls } from "@/components/simulation-controls";
 import { ServerCards } from "@/components/server-cards";
@@ -49,6 +50,7 @@ export default function App() {
               <SystemEvents />
 
               <AlgorithmComparison />
+              <BenchmarkPanel />
             </div>
           </main>
         </SidebarInset>
