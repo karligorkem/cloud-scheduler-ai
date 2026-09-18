@@ -225,6 +225,23 @@ def build_state() -> dict:
             if environment.job_definitions is not None
             else "synthetic"
         ),
+                "job_definitions": [
+            {
+                "job_id": definition.job_id,
+                "required_cpu": definition.required_cpu,
+                "required_memory_gb": (
+                    definition.required_memory_gb
+                ),
+                "duration_steps": definition.duration_steps,
+                "required_gpu_count": (
+                    definition.required_gpu_count
+                ),
+                "arrival_step": definition.arrival_step,
+            }
+            for definition in (
+                environment.job_definitions or ()
+            )
+        ],
         "pending_count": len(simulation.pending_jobs),
         "pending_count": len(simulation.pending_jobs),
         "queue_count": len(simulation.queue.jobs),

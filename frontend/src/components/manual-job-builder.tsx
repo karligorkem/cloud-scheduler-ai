@@ -26,6 +26,19 @@ interface JobDraft {
   required_gpu_count: string;
   arrival_step: string;
 }
+interface EventWorkloadResponse {
+  source: string;
+  event_count: number;
+  job_count: number;
+  jobs: {
+    job_id: string;
+    required_cpu: number;
+    required_memory_gb: number;
+    duration_steps: number;
+    required_gpu_count: number;
+    arrival_step: number;
+  }[];
+}
 
 let nextKey = 3;
 
@@ -129,7 +142,66 @@ export function ManualJobBuilder() {
 
     setError("");
   }
+  async function loadJobsFromWindowsEvents(): Promise<void> {
+    if (busy) return;
 
+    setBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const response = await fetch(
+        "http://127.0.0.1:8000/api/system-events/workload?limit=20",
+        {
+          cache: "no-store",
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(await readApiError(response));
+      }
+
+      const result: EventWorkloadResponse =
+        await response.json();
+
+      const eventJobs: JobDraft[] = result.jobs.map(
+        (job) => {
+          const key = nextKey;
+          nextKey += 1;
+
+          return {
+            key,
+            job_id: job.job_id,
+            required_cpu: String(job.required_cpu),
+            required_memory_gb: String(
+              job.required_memory_gb,
+            ),
+            duration_steps: String(job.duration_steps),
+            required_gpu_count: String(
+              job.required_gpu_count,
+            ),
+            arrival_step: String(job.arrival_step),
+          };
+        },
+      );
+
+      setJobs(eventJobs);
+
+      setMessage(
+        `${result.event_count} Windows olayı görev formuna aktarıldı. Değerleri kontrol edip deneyi başlatabilirsin.`,
+      );
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof TypeError
+          ? "Backend'e bağlanılamadı. 8000 portunu kontrol et."
+          : caughtError instanceof Error
+            ? caughtError.message
+            : "Windows olayları görevlere dönüştürülemedi.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
   async function startManualExperiment(): Promise<void> {
     if (busy) return;
 
@@ -347,6 +419,15 @@ export function ManualJobBuilder() {
               onClick={addJob}
             >
               + Görev ekle
+              <Button
+                 type="button"
+                 variant="outline"
+                disabled={busy}
+                onClick={() => void loadJobsFromWindowsEvents()}
+              className="border-orange-500/30 text-orange-300 hover:bg-orange-500/10"
+>
+  Windows olaylarından doldur
+</Button>
             </Button>
 
             <Button

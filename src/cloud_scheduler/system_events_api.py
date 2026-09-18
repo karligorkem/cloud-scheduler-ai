@@ -294,5 +294,105 @@ def get_system_events(
         "events": events,
     }
 
+@router.get("/workload")
+def create_workload_from_events(
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """Kaydedilmiş Windows olaylarını simülasyon görevlerine dönüştürür."""
+
+    saved_events = list_saved_events(limit, None)
+
+    if not saved_events:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Kaydedilmis Windows olayi bulunamadi. "
+                "Once olaylari toplayin."
+            ),
+        )
+
+    # En eski olay önce gelecek şekilde sırala.
+    ordered_events = list(reversed(saved_events))
+
+    jobs = []
+
+    for index, event in enumerate(ordered_events):
+        level_number = event["level_number"]
+
+        if level_number == 1:
+            required_cpu = 8
+            required_memory_gb = 16.0
+            duration_steps = 6
+        elif level_number == 2:
+            required_cpu = 4
+            required_memory_gb = 8.0
+            duration_steps = 5
+        elif level_number == 3:
+            required_cpu = 2
+            required_memory_gb = 4.0
+            duration_steps = 3
+        else:
+            required_cpu = 1
+            required_memory_gb = 2.0
+            duration_steps = 2
+
+        log_prefix = (
+            str(event["log_name"])
+            .lower()
+            .replace(" ", "-")
+        )
+
+        jobs.append(
+            {
+                "job_id": (
+                    f"{log_prefix}-"
+                    f"event-{event['event_id']}-"
+                    f"{event['record_id']}"
+                ),
+                "required_cpu": required_cpu,
+                "required_memory_gb": required_memory_gb,
+                "duration_steps": duration_steps,
+                "required_gpu_count": 0,
+                "arrival_step": index // 2,
+                "source_event": {
+                    "identity": event["identity"],
+                    "event_id": event["event_id"],
+                    "provider": event["provider"],
+                    "level": event["level"],
+                    "log_name": event["log_name"],
+                    "time_created": event["time_created"],
+                },
+            }
+        )
+
+    return {
+        "source": "windows_event_log",
+        "event_count": len(saved_events),
+        "job_count": len(jobs),
+        "mapping": {
+            "critical": {
+                "cpu": 8,
+                "memory_gb": 16,
+                "duration_steps": 6,
+            },
+            "error": {
+                "cpu": 4,
+                "memory_gb": 8,
+                "duration_steps": 5,
+            },
+            "warning": {
+                "cpu": 2,
+                "memory_gb": 4,
+                "duration_steps": 3,
+            },
+            "information": {
+                "cpu": 1,
+                "memory_gb": 2,
+                "duration_steps": 2,
+            },
+        },
+        "jobs": jobs,
+    }
+
 
 initialize_system_events()
